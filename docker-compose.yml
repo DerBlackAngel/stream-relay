@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  nginx-rtmp:
+    image: tiangolo/nginx-rtmp
+    container_name: nginx-rtmp
+    restart: always
+    ports:
+      - "1935:1935"
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx-rtmp-html:/usr/local/nginx/html:ro
+    depends_on:
+      - auth-server
+    networks:
+      - relay
+
+  auth-server:
+    build:
+      context: ./auth-server
+    container_name: auth-server
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - relay
+
+  panel-server:
+    build: ./panel-server
+    container_name: panel-server
+    restart: always
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./panel-server:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - ffmpeg-runner
+    networks:
+      - relay
+
+  ffmpeg-runner:
+    image: jrottenberg/ffmpeg:4.1-ubuntu1804
+    container_name: ffmpeg-runner
+    entrypoint: tail -f /dev/null
+    volumes:
+      - ./ffmpeg:/ffmpeg
+    networks:
+      - relay
+
+  ffmpeg-loop:
+    build:
+      context: ./ffmpeg
+    container_name: ffmpeg-loop
+    restart: always
+    depends_on:
+      - nginx-rtmp
+    volumes:
+      - ./ffmpeg:/ffmpeg
+    networks:
+      - relay
+
+  stream-guard:
+    build:
+      context: ./stream-guard
+    container_name: stream-guard
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - relay
+
+networks:
+  relay:
+    driver: bridge

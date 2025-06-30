@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Stream Control Panel</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #111;
+      color: #fff;
+      padding: 20px;
+    }
+    .input-status {
+      display: flex;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .dot {
+      width: 15px;
+      height: 15px;
+      border-radius: 50%;
+      background-color: grey;
+    }
+    .dot.green {
+      background-color: limegreen;
+    }
+    .dot.red {
+      background-color: red;
+    }
+    button {
+      padding: 10px;
+      margin: 0.3rem;
+      font-size: 1rem;
+      cursor: pointer;
+    }
+    .panel {
+      margin-top: 2rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>🎛️ Stream Control Panel</h1>
+
+  <div class="input-status" id="status">
+    <div class="status"><div class="dot" id="dot-dennis"></div> Dennis</div>
+    <div class="status"><div class="dot" id="dot-auria"></div> Auria</div>
+    <div class="status"><div class="dot" id="dot-mobil"></div> Mobil</div>
+  </div>
+
+  <div class="panel">
+    <h2>🎬 Aktiven Stream starten</h2>
+    <select id="input">
+      <option value="dennis">Dennis</option>
+      <option value="auria">Auria</option>
+      <option value="mobil">Mobil</option>
+    </select>
+
+    <label><input type="checkbox" id="twitch" checked /> Twitch</label>
+    <label><input type="checkbox" id="youtube" /> YouTube</label>
+    <br><br>
+    <button onclick="startStream()">🚀 Stream starten</button>
+    <button onclick="stopStream()">🛑 Stop / BRB</button>
+  </div>
+
+  <script>
+    let currentInput = null;
+    let autoSwitched = false;
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch("/status");
+        const data = await res.json();
+        updateStatus(data);
+
+        if (currentInput && !autoSwitched && !data[currentInput]) {
+          console.warn(`⚠️ ${currentInput} ist offline – wechsle zu BRB`);
+          autoSwitched = true;
+          await stopStream(true);
+        }
+      } catch (err) {
+        console.error("Fehler beim Abrufen des Status:", err);
+      }
+    }
+
+    function updateStatus(data) {
+      ["dennis", "auria", "mobil"].forEach(name => {
+        const dot = document.getElementById("dot-" + name);
+        if (data[name]) {
+          dot.classList.add("green");
+          dot.classList.remove("red");
+        } else {
+          dot.classList.remove("green");
+          dot.classList.add("red");
+        }
+      });
+    }
+
+    async function startStream() {
+      const input = document.getElementById("input").value;
+      const twitch = document.getElementById("twitch").checked;
+      const youtube = document.getElementById("youtube").checked;
+
+      currentInput = input;
+      autoSwitched = false;
+
+      const res = await fetch("/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ input, twitch, youtube }),
+      });
+
+      const text = await res.text();
+      alert(text);
+    }
+
+    async function stopStream(isAuto = false) {
+      const res = await fetch("/stop", { method: "POST" });
+      const text = await res.text();
+      if (!isAuto) alert(text);
+    }
+
+    setInterval(fetchStatus, 2000);
+    fetchStatus();
+  </script>
+</body>
+</html>

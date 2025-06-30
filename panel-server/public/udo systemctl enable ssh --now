@@ -1,0 +1,23 @@
+[0;1;32m●[0m ssh.service - OpenBSD Secure Shell server
+     Loaded: loaded (]8;;file://StreamServer/usr/lib/systemd/system/ssh.service/usr/lib/systemd/system/ssh.service]8;;; [0;1;38;5;185mdisabled[0m; preset: [0;1;32menabled[0m)
+     Active: [0;1;32mactive (running)[0m since Wed 2025-06-25 19:24:18 UTC; 4h 1min ago
+TriggeredBy: [0;1;32m●[0m ssh.socket
+       Docs: ]8;;man:sshd(8)man:sshd(8)]8;;
+             ]8;;man:sshd_config(5)man:sshd_config(5)]8;;
+   Main PID: 1062 (sshd)
+      Tasks: 1 (limit: 4540)
+     Memory: 4.8M (peak: 9.4M)
+        CPU: 2.610s
+     CGroup: /system.slice/ssh.service
+             └─[0;38;5;245m1062 "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups"[0m
+
+Jun 25 20:23:52 StreamServer sshd[9717]: Failed password for invalid user user from 45.134.26.79 port 49468 ssh2
+Jun 25 20:23:53 StreamServer sshd[9717]: Connection reset by invalid user user 45.134.26.79 port 49468 [preauth]
+Jun 25 20:23:57 StreamServer sshd[9720]: Invalid user user from 45.134.26.79 port 32738
+Jun 25 20:23:57 StreamServer sshd[9720]: [0;1;39m[0;1;31m[0;1;39mpam_unix(sshd:auth): check pass; user unknown[0m
+Jun 25 20:23:57 StreamServer sshd[9720]: [0;1;39m[0;1;31m[0;1;39mpam_unix(sshd:auth): authentication failure; logname= uid=0 euid=0 tty=ssh ruser= rhost=45.134.26.79[0m
+Jun 25 20:24:00 StreamServer sshd[9720]: Failed password for invalid user user from 45.134.26.79 port 32738 ssh2
+Jun 25 20:24:02 StreamServer sshd[9720]: [0;1;31m[0;1;39m[0;1;31mfatal: userauth_finish: send failure packet: Connection reset by peer [preauth][0m
+Jun 25 20:32:38 StreamServer sshd[9750]: [0;1;39m[0;1;31m[0;1;39mpam_unix(sshd:auth): authentication failure; logname= uid=0 euid=0 tty=ssh ruser= rhost=45.140.17.124  user=root[0m
+Jun 25 20:32:40 StreamServer sshd[9750]: Failed password for root from 45.140.17.124 port 48314 ssh2
+Jun 25 20:32:42 StreamServer sshd[9750]: [0;1;31m[0;1;39m[0;1;31mfatal: userauth_finish: send failure packet: Connection reset by peer [preauth][0m
