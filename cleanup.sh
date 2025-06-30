@@ -16,4 +16,4 @@ echo "🚀 Starte alle Container neu im Hintergrund..."
 docker-compose up -d
 
 echo "✅ Bereinigung abgeschlossen & Container neu gestartet!"
-#test
+#test2
