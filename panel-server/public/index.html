@@ -5,43 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Stream Control Panel</title>
   <style>
-    body {
-      font-family: sans-serif;
-      background: #111;
-      color: #fff;
-      padding: 20px;
-    }
-    .input-status {
-      display: flex;
-      gap: 1rem;
-      margin-bottom: 1rem;
-    }
-    .status {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-    .dot {
-      width: 15px;
-      height: 15px;
-      border-radius: 50%;
-      background-color: grey;
-    }
-    .dot.green {
-      background-color: limegreen;
-    }
-    .dot.red {
-      background-color: red;
-    }
-    button {
-      padding: 10px;
-      margin: 0.3rem;
-      font-size: 1rem;
-      cursor: pointer;
-    }
-    .panel {
-      margin-top: 2rem;
-    }
+    body { font-family: sans-serif; background:#111; color:#fff; padding:20px; }
+    .input-status { display:flex; gap:1rem; margin-bottom:1rem; }
+    .status { display:flex; align-items:center; gap:0.5rem; }
+    .dot { width:15px; height:15px; border-radius:50%; background-color:grey; }
+    .dot.green { background-color:limegreen; }
+    .dot.red { background-color:red; }
+    button { padding:10px; margin:0.3rem; font-size:1rem; cursor:pointer; }
+    .panel { margin-top:2rem; }
   </style>
 </head>
 <body>
@@ -69,36 +40,23 @@
   </div>
 
   <script>
-    let currentInput = null;
-    let autoSwitched = false;
-
     async function fetchStatus() {
       try {
         const res = await fetch("/status");
-        const data = await res.json();
-        updateStatus(data);
-
-        if (currentInput && !autoSwitched && !data[currentInput]) {
-          console.warn(`⚠️ ${currentInput} ist offline – wechsle zu BRB`);
-          autoSwitched = true;
-          await stopStream(true);
-        }
+        const json = await res.json();
+        updateStatus(json);
       } catch (err) {
         console.error("Fehler beim Abrufen des Status:", err);
       }
     }
 
     function updateStatus(data) {
-      ["dennis", "auria", "mobil"].forEach(name => {
+      const map = { dennis: !!data.dennis, auria: !!data.auria, mobil: !!data.mobil };
+      for (const name of Object.keys(map)) {
         const dot = document.getElementById("dot-" + name);
-        if (data[name]) {
-          dot.classList.add("green");
-          dot.classList.remove("red");
-        } else {
-          dot.classList.remove("green");
-          dot.classList.add("red");
-        }
-      });
+        dot.classList.toggle("green", map[name]);
+        dot.classList.toggle("red", !map[name]);
+      }
     }
 
     async function startStream() {
@@ -106,23 +64,19 @@
       const twitch = document.getElementById("twitch").checked;
       const youtube = document.getElementById("youtube").checked;
 
-      currentInput = input;
-      autoSwitched = false;
-
       const res = await fetch("/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ input, twitch, youtube }),
       });
-
       const text = await res.text();
-      alert(text);
+      alert(res.ok ? `✅ Umschaltung: ${input}\n${text}` : `❌ Fehler: ${text}`);
     }
 
-    async function stopStream(isAuto = false) {
+    async function stopStream() {
       const res = await fetch("/stop", { method: "POST" });
       const text = await res.text();
-      if (!isAuto) alert(text);
+      alert(res.ok ? "🛑 BRB aktiv" : `❌ Fehler: ${text}`);
     }
 
     setInterval(fetchStatus, 2000);

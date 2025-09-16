@@ -1,0 +1,20 @@
+# Node
+**/node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+**/.env
+**/.env.*
+# Editor/OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+# Logs
+logs/
+*.log
+# Docker/Build
+docker-data/
+*.pid
+# Media & temp
+ffmpeg/brb.mp4

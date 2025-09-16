@@ -1,17 +1,17 @@
-FROM node:18
-
-# Docker CLI installieren
-RUN apt-get update && \
-    apt-get install -y docker.io
-
-# Arbeitsverzeichnis
+FROM node:20-alpine
 WORKDIR /app
 
-# Dateien kopieren
-COPY . .
+# package.json separat kopieren für besseren Build-Cache
+COPY package.json ./
 
-# Abhängigkeiten installieren
-RUN npm install
+# Wenn package-lock.json existiert -> npm ci, sonst npm install
+RUN if [ -f package-lock.json ]; then \
+      echo "Using npm ci" && npm ci --omit=dev; \
+    else \
+      echo "Using npm install" && npm install --omit=dev; \
+    fi
 
-# App starten
-CMD ["node", "index.js"]
+# App-Code
+COPY index.js .
+EXPOSE 3000
+CMD ["node","index.js"]

@@ -6,10 +6,14 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-let activeInput = "brb"; // Initial immer auf Loop gesetzt
+let activeInput = "brb"; // Startzustand: immer BRB-Loop
 
 const inputs = ["dennis", "auria", "mobil"];
-const twitchStreamUrl = "rtmp://live.twitch.tv/app/live_1292654616_qmwWRqcG0IDbu88xC35lhJN9otgLBd";
+const TWITCH_STREAM_KEY = process.env.TWITCH_STREAM_KEY || "";
+if (!TWITCH_STREAM_KEY) {
+  console.warn("⚠️  TWITCH_STREAM_KEY ist nicht gesetzt. Setze ihn in .env / Compose!");
+}
+const twitchStreamUrl = `rtmp://live.twitch.tv/app/${TWITCH_STREAM_KEY}`;
 
 function isLive(inputName) {
   try {
@@ -17,7 +21,7 @@ function isLive(inputName) {
       `curl -s http://nginx-rtmp:8080/stat | grep -A10 "<name>${inputName}</name>"`
     ).toString();
     return result.includes("<bw>");
-  } catch (err) {
+  } catch {
     return false;
   }
 }
@@ -46,7 +50,6 @@ function startInputStream(inputName) {
     "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
     "-f", "flv", twitchStreamUrl
   ];
-
   spawn(cmd[0], cmd.slice(1), { stdio: "inherit" });
 }
 
@@ -71,13 +74,12 @@ function switchTo(inputName) {
 
 app.post("/switch", (req, res) => {
   const { input } = req.body;
-  if (!inputs.includes(input)) {
+  if (!inputs.includes(input) && input !== "brb") {
     return res.status(400).json({ error: "Ungültiger Input" });
   }
-
   console.log(`🟢 Manuelle Umschaltung auf: ${input}`);
   switchTo(input);
-  res.json({ status: "ok", active: input });
+  res.json({ success: true, active: input });
 });
 
 app.get("/status", (req, res) => {
@@ -85,22 +87,12 @@ app.get("/status", (req, res) => {
   for (const input of inputs) {
     status[input] = isLive(input);
   }
-
-  res.json({
-    inputs: status,
-    activeInput,
-  });
+  res.json({ inputs: status, activeInput });
 });
 
 setInterval(() => {
   if (activeInput === "brb") return;
-
   const stillLive = isLive(activeInput);
-  console.log(`🕵️‍♂️ Überprüfe aktiven Input: ${activeInput}`);
-  for (const input of inputs) {
-    console.log(`📡 RTMP-Status: ${input}=${isLive(input)}`);
-  }
-
   if (!stillLive) {
     console.log(`⚠️ ${activeInput} ist nicht mehr live – schalte zu BRB`);
     switchTo("brb");

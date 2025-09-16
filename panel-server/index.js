@@ -1,5 +1,5 @@
 const express = require("express");
-const { exec, execSync, spawn } = require("child_process");
+const { exec } = require("child_process");
 const cors = require("cors");
 const path = require("path");
 const axios = require("axios");
@@ -8,102 +8,82 @@ const xml2js = require("xml2js");
 const app = express();
 const PORT = 4000;
 
-// 🔑 DEIN TWITCH-KEY HIER EINTRAGEN
-const TWITCH_STREAM_KEY = "live_1292654616_qmwWRqcG0IDbu88xC35lhJN9otgLBd"; // <== WICHTIG!
+const TWITCH_STREAM_KEY = process.env.TWITCH_STREAM_KEY || "";
+if (!TWITCH_STREAM_KEY) {
+  console.warn("⚠️  TWITCH_STREAM_KEY ist nicht gesetzt. Setze ihn in .env / Compose!");
+}
+const YOUTUBE_STREAM_KEY = process.env.YOUTUBE_STREAM_KEY || ""; // optional
 
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
-// 🔍 RTMP-Livestatus abrufen für Webpanel
+// RTMP-Livestatus fürs Webpanel
 app.get("/status", async (req, res) => {
   try {
     const response = await axios.get("http://nginx-rtmp:8080/stat");
     const result = await xml2js.parseStringPromise(response.data);
-    const streams = result.rtmp.server[0].application.find(app => app.name[0] === "live").live[0].stream || [];
-
-    const getLive = (name) => streams.some(s => s.name[0] === name);
-    res.json({
-      dennis: getLive("dennis"),
-      auria: getLive("auria"),
-      mobil: getLive("mobil")
-    });
+    const liveApp = (result?.rtmp?.server?.[0]?.application || []).find(a => a.name?.[0] === "live");
+    const streams = liveApp?.live?.[0]?.stream || [];
+    const getLive = (name) => streams.some(s => s.name?.[0] === name);
+    res.json({ dennis: getLive("dennis"), auria: getLive("auria"), mobil: getLive("mobil") });
   } catch (err) {
     console.error("Fehler beim Parsen von RTMP-Stat:", err);
     res.status(500).json({ error: "Fehler beim Laden der Stream-Status" });
   }
 });
 
-// 🚀 STREAM STARTEN
+// Stream starten (Weiterleitung)
 app.post("/start", (req, res) => {
-  const { input, twitch, youtube } = req.body;
-
-  console.log("⚙️ /start API wurde aufgerufen");
-  console.log(`🔁 Starte Umschaltung auf: ${input} → ${twitch ? "twitch" : ""} ${youtube ? "+ youtube" : ""}`);
-
-  if (!twitch && !youtube) {
-    return res.status(400).send("❌ Kein Ziel ausgewählt");
+  const { input, twitch = true, youtube = false } = req.body;
+  if (!["dennis", "auria", "mobil", "brb"].includes(input)) {
+    return res.status(400).send("❌ Ungültiger Input");
   }
 
-  // 🛑 Stoppe alte ffmpeg-Prozesse im ffmpeg-runner
-  try {
-    execSync(`docker exec ffmpeg-runner pkill -9 ffmpeg`);
-    console.log("🛑 Alte ffmpeg Instanzen gestoppt");
-  } catch {
-    console.log("ℹ️ Keine laufenden ffmpeg-Prozesse");
-  }
-
+  const commands = [];
   if (twitch) {
-    const twitchCmd = [
-      "exec", "ffmpeg-runner", "ffmpeg",
-      "-re", "-i", `rtmp://nginx-rtmp/live/${input}`,
-      "-c", "copy", "-f", "flv",
-      `rtmp://live.twitch.tv/app/${TWITCH_STREAM_KEY}`
-    ];
-    console.log("🚀 Starte Twitch ffmpeg-Prozess (Debug aktiv)...");
-    const proc = spawn("/usr/bin/docker", twitchCmd);
-
-    proc.stdout.on("data", (data) => console.log(`📤 Twitch stdout: ${data.toString()}`));
-    proc.stderr.on("data", (data) => console.error(`📥 Twitch stderr: ${data.toString()}`));
-    proc.on("close", (code) => console.log(`❌ Twitch-ffmpeg beendet mit Code ${code}`));
-    proc.on("error", (err) => console.error(`💥 Spawn-Fehler: ${err.message}`));
+    if (!TWITCH_STREAM_KEY) return res.status(500).send("❌ TWITCH_STREAM_KEY fehlt");
+    const twitchCmd = `docker exec ffmpeg-runner ffmpeg -re -i rtmp://nginx-rtmp/live/${input} -c copy -f flv rtmp://live.twitch.tv/app/${TWITCH_STREAM_KEY}`;
+    commands.push(twitchCmd);
   }
-
   if (youtube) {
-    const youtubeKey = "YOUR_YOUTUBE_KEY"; // <== ggf. hier einsetzen
-    const ytCmd = [
-      "exec", "ffmpeg-runner", "ffmpeg",
-      "-re", "-i", `rtmp://nginx-rtmp/live/${input}`,
-      "-c", "copy", "-f", "flv",
-      `rtmp://a.rtmp.youtube.com/live2/${youtubeKey}`
-    ];
-    console.log("🚀 Starte YouTube ffmpeg-Prozess...");
-    const proc = spawn("/usr/bin/docker", ytCmd);
-    proc.stdout.on("data", (data) => console.log(`📤 YouTube stdout: ${data.toString()}`));
-    proc.stderr.on("data", (data) => console.error(`📥 YouTube stderr: ${data.toString()}`));
-    proc.on("close", (code) => console.log(`❌ YouTube-ffmpeg beendet mit Code ${code}`));
-    proc.on("error", (err) => console.error(`💥 Spawn-Fehler: ${err.message}`));
+    if (!YOUTUBE_STREAM_KEY) return res.status(500).send("❌ YOUTUBE_STREAM_KEY fehlt");
+    const youtubeCmd = `docker exec ffmpeg-runner ffmpeg -re -i rtmp://nginx-rtmp/live/${input} -c copy -f flv rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}`;
+    commands.push(youtubeCmd);
   }
+  if (!commands.length) return res.status(400).send("❌ Kein Ziel ausgewählt");
+
+  commands.forEach(cmd => {
+    exec(cmd, (error) => {
+      if (error) console.error(`❌ Fehler beim Start: ${error.message}`);
+      else console.log(`✅ Stream gestartet: ${cmd}`);
+    });
+  });
 
   res.send("🚀 Stream gestartet");
 });
 
-// 🛑 STREAM STOPPEN (BRB)
+// BRB
 app.post("/stop", (req, res) => {
+  if (!TWITCH_STREAM_KEY) return res.status(500).send("❌ TWITCH_STREAM_KEY fehlt");
   const cmd = `docker exec ffmpeg-runner ffmpeg -re -stream_loop -1 -i /ffmpeg/brb.mp4 -c copy -f flv rtmp://live.twitch.tv/app/${TWITCH_STREAM_KEY}`;
   console.log("🛑 Wechsle zu BRB-Video");
-
-  exec(cmd, (error, stdout, stderr) => {
-    if (error) {
-      console.error(`❌ Fehler beim Umschalten auf BRB: ${error.message}`);
-      return res.status(500).send("Fehler beim Stoppen des Streams");
-    }
+  exec(cmd, (error) => {
+    if (error) return res.status(500).send("Fehler beim Umschalten auf BRB");
     console.log("✅ BRB-Video läuft");
     res.send("🛑 BRB-Video gestartet");
   });
 });
 
-// 🌐 Server starten
+// Kompatibilität: /switch -> /start
+app.post("/switch", (req, res) => {
+  const { input } = req.body;
+  if (input === "brb") return app._router.handle({ ...req, url: "/stop", method: "POST" }, res, () => {});
+  req.body.twitch = true;
+  req.body.youtube = false;
+  return app._router.handle({ ...req, url: "/start", method: "POST" }, res, () => {});
+});
+
 app.listen(PORT, () => {
   console.log(`✅ Panel-Server läuft auf Port ${PORT}`);
 });
