@@ -1,8 +1,12 @@
 {
-  "name": "stream-panel-server",
+  "name": "panel-server",
   "version": "1.0.0",
   "private": true,
-  "type": "module",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "axios": "^1.7.2",
     "cors": "^2.8.5",
