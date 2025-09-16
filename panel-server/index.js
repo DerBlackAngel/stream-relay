@@ -1,5 +1,5 @@
 const express = require("express");
-const { exec } = require("child_process");
+const { spawn } = require("child_process");
 const cors = require("cors");
 const path = require("path");
 const axios = require("axios");
@@ -31,12 +31,10 @@ function findApp(result, appName) {
 function getFirstStreamNameFromApp(appNode) {
   const streams = appNode?.live?.[0]?.stream || [];
   if (!streams.length) return null;
-  // nimm den ersten aktiven Stream
   return streams[0]?.name?.[0] || null;
 }
 
 function buildInputUrl(appName, streamName) {
-  // Beispiel: rtmp://nginx-rtmp:1935/dennis/test
   return `rtmp://nginx-rtmp:1935/${appName}/${streamName}`;
 }
 
@@ -45,18 +43,24 @@ function buildBrbInputUrl() {
   return "rtmp://nginx-rtmp:1935/live/brb";
 }
 
-function run(cmd, label = "cmd") {
-  console.log(`$ ${cmd}`);
-  exec(cmd, (error, stdout, stderr) => {
-    if (error) console.error(`❌ ${label} error:`, error.message);
-    if (stdout) console.log(`ℹ️  ${label} out:`, stdout.toString().trim());
-    if (stderr) console.log(`ℹ️  ${label} err:`, stderr.toString().trim());
+function killFFmpeg() {
+  // nur im ffmpeg-runner Container (nicht ffmpeg-loop)
+  const args = ["exec", "ffmpeg-runner", "pkill", "-9", "ffmpeg"];
+  const p = spawn("docker", args, { stdio: "ignore" });
+  p.on("exit", (code) => {
+    console.log(`🛑 kill-ffmpeg exit=${code}`);
   });
 }
 
-function killFFmpeg() {
-  // nur im ffmpeg-runner Container (nicht ffmpeg-loop)
-  run(`docker exec ffmpeg-runner pkill -9 ffmpeg || true`, "kill-ffmpeg");
+function spawnFfmpeg(args, label) {
+  // Führt: docker exec ffmpeg-runner ffmpeg <args...> aus — stabil & ohne Bufferlimit
+  const fullArgs = ["exec", "ffmpeg-runner", "ffmpeg", "-loglevel", "error", ...args];
+  console.log(`$ docker ${fullArgs.join(" ")}`);
+  const p = spawn("docker", fullArgs, { stdio: "ignore" });
+  p.on("exit", (code, signal) => {
+    console.log(`ℹ️ ${label} exit=${code} signal=${signal ?? "none"}`);
+  });
+  return p;
 }
 
 // ---- Routes ---------------------------------------------------------------
@@ -106,7 +110,6 @@ app.post("/start", async (req, res) => {
     return res.status(400).send("❌ Kein Ziel ausgewählt");
   }
 
-  // Ermittele die Input-URL
   let inputUrl = null;
   try {
     if (["dennis", "auria", "mobil"].includes(input)) {
@@ -114,7 +117,6 @@ app.post("/start", async (req, res) => {
       const appNode = findApp(result, input);
       const streamName = getFirstStreamNameFromApp(appNode);
       if (!streamName) {
-        // Kein aktiver Stream: Fallback = BRB
         inputUrl = buildBrbInputUrl();
         console.log(`⚠️ Kein aktiver Stream bei '${input}' gefunden – Fallback auf BRB.`);
       } else {
@@ -122,7 +124,6 @@ app.post("/start", async (req, res) => {
         console.log(`📡 Quelle: ${inputUrl}`);
       }
     } else {
-      // brb oder live: immer live/brb
       inputUrl = buildBrbInputUrl();
       console.log(`📼 Quelle: BRB (${inputUrl})`);
     }
@@ -135,21 +136,22 @@ app.post("/start", async (req, res) => {
   // Alte Weiterleitungen stoppen
   killFFmpeg();
 
-  // Kommandos bauen
-  const commands = [];
+  // Start-Kommandos bauen
+  const jobs = [];
   if (twitch) {
     if (!TWITCH_STREAM_KEY) return res.status(500).send("❌ TWITCH_STREAM_KEY fehlt");
-    const twitchCmd = `docker exec ffmpeg-runner ffmpeg -re -i "${inputUrl}" -c copy -f flv "rtmp://live.twitch.tv/app/${TWITCH_STREAM_KEY}"`;
-    commands.push(twitchCmd);
+    jobs.push(spawnFfmpeg(
+      ["-re", "-i", inputUrl, "-c", "copy", "-f", "flv", `rtmp://live.twitch.tv/app/${TWITCH_STREAM_KEY}`],
+      "ffmpeg-start-twitch"
+    ));
   }
   if (youtube) {
     if (!YOUTUBE_STREAM_KEY) return res.status(500).send("❌ YOUTUBE_STREAM_KEY fehlt");
-    const ytCmd = `docker exec ffmpeg-runner ffmpeg -re -i "${inputUrl}" -c copy -f flv "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"`;
-    commands.push(ytCmd);
+    jobs.push(spawnFfmpeg(
+      ["-re", "-i", inputUrl, "-c", "copy", "-f", "flv", `rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}`],
+      "ffmpeg-start-youtube"
+    ));
   }
-
-  // Starten
-  commands.forEach((cmd, i) => run(cmd, `ffmpeg-start-${i + 1}`));
 
   res.send(`🚀 Weiterleitung gestartet von '${input}' (${inputUrl}) → ${[
     twitch ? "Twitch" : null,
@@ -166,20 +168,21 @@ app.post("/stop", (_req, res) => {
   // Alte Weiterleitungen stoppen
   killFFmpeg();
 
-  const brbUrl = buildBrbInputUrl();
-
-  const commands = [];
+  // BRB-Job(s) starten
   if (TWITCH_STREAM_KEY) {
-    const cmd = `docker exec ffmpeg-runner ffmpeg -re -stream_loop -1 -i /ffmpeg/brb.mp4 -c copy -f flv "rtmp://live.twitch.tv/app/${TWITCH_STREAM_KEY}"`;
-    commands.push(cmd);
+    spawnFfmpeg(
+      ["-re", "-stream_loop", "-1", "-i", "/ffmpeg/brb.mp4", "-c", "copy", "-f", "flv", `rtmp://live.twitch.tv/app/${TWITCH_STREAM_KEY}`],
+      "ffmpeg-brb-twitch"
+    );
   }
   if (YOUTUBE_STREAM_KEY) {
-    const cmd = `docker exec ffmpeg-runner ffmpeg -re -stream_loop -1 -i /ffmpeg/brb.mp4 -c copy -f flv "rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}"`;
-    commands.push(cmd);
+    spawnFfmpeg(
+      ["-re", "-stream_loop", "-1", "-i", "/ffmpeg/brb.mp4", "-c", "copy", "-f", "flv", `rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}`],
+      "ffmpeg-brb-youtube"
+    );
   }
 
-  commands.forEach((cmd, i) => run(cmd, `ffmpeg-brb-${i + 1}`));
-  res.send(`🛑 BRB gestartet (${brbUrl})`);
+  res.send(`🛑 BRB gestartet (${buildBrbInputUrl()})`);
 });
 
 // Kompatibilität: /switch -> /start
