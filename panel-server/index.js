@@ -39,33 +39,32 @@ function buildInputUrl(appName, streamName) {
 }
 
 function buildBrbInputUrl() {
-  // Unser BRB-Loop speist in live/brb ein (siehe ffmpeg-loop)
   return "rtmp://nginx-rtmp:1935/live/brb";
 }
 
-function killFFmpeg() {
-  // nur im ffmpeg-runner Container (nicht ffmpeg-loop)
-  const args = ["exec", "ffmpeg-runner", "pkill", "-9", "ffmpeg"];
+function runDocker(args, label) {
+  // Führt "docker <args...>" aus und loggt Exitcodes
   const p = spawn("docker", args, { stdio: "ignore" });
-  p.on("exit", (code) => {
-    console.log(`🛑 kill-ffmpeg exit=${code}`);
-  });
-}
-
-function spawnFfmpeg(args, label) {
-  // Führt: docker exec ffmpeg-runner ffmpeg <args...> aus — stabil & ohne Bufferlimit
-  const fullArgs = ["exec", "ffmpeg-runner", "ffmpeg", "-loglevel", "error", ...args];
-  console.log(`$ docker ${fullArgs.join(" ")}`);
-  const p = spawn("docker", fullArgs, { stdio: "ignore" });
   p.on("exit", (code, signal) => {
-    console.log(`ℹ️ ${label} exit=${code} signal=${signal ?? "none"}`);
+    console.log(`ℹ️ docker ${label} exit=${code} signal=${signal ?? "none"}`);
   });
   return p;
 }
 
+function killFFmpeg() {
+  // nur im ffmpeg-runner Container (nicht ffmpeg-loop)
+  runDocker(["exec", "-d", "ffmpeg-runner", "pkill", "-9", "ffmpeg"], "kill-ffmpeg");
+}
+
+function spawnFfmpegDetached(args, label) {
+  // Wichtig: -d -> detached, damit ffmpeg weiterläuft, auch wenn das aufrufende "docker" beendet
+  const fullArgs = ["exec", "-d", "ffmpeg-runner", "ffmpeg", "-loglevel", "error", ...args];
+  console.log(`$ docker ${fullArgs.join(" ")}`);
+  return runDocker(fullArgs, label);
+}
+
 // ---- Routes ---------------------------------------------------------------
 
-// Healthcheck
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
@@ -75,7 +74,6 @@ app.get("/health", (_req, res) => {
   });
 });
 
-// RTMP-Livestatus fürs Webpanel
 app.get("/status", async (_req, res) => {
   try {
     const result = await fetchStatXml();
@@ -97,18 +95,14 @@ app.get("/status", async (_req, res) => {
   }
 });
 
-// Stream starten (Weiterleitung zu Twitch/YouTube) mit Auto-Detect des Stream-Namens
+// Start mit Auto-Detect des Stream-Namens
 app.post("/start", async (req, res) => {
   const { input, twitch = true, youtube = false } = req.body || {};
   if (!input) return res.status(400).send("❌ 'input' fehlt");
 
   const allowed = ["dennis", "auria", "mobil", "brb", "live"];
-  if (!allowed.includes(input)) {
-    return res.status(400).send("❌ Ungültiger Input");
-  }
-  if (!twitch && !youtube) {
-    return res.status(400).send("❌ Kein Ziel ausgewählt");
-  }
+  if (!allowed.includes(input)) return res.status(400).send("❌ Ungültiger Input");
+  if (!twitch && !youtube) return res.status(400).send("❌ Kein Ziel ausgewählt");
 
   let inputUrl = null;
   try {
@@ -136,21 +130,19 @@ app.post("/start", async (req, res) => {
   // Alte Weiterleitungen stoppen
   killFFmpeg();
 
-  // Start-Kommandos bauen
-  const jobs = [];
   if (twitch) {
     if (!TWITCH_STREAM_KEY) return res.status(500).send("❌ TWITCH_STREAM_KEY fehlt");
-    jobs.push(spawnFfmpeg(
+    spawnFfmpegDetached(
       ["-re", "-i", inputUrl, "-c", "copy", "-f", "flv", `rtmp://live.twitch.tv/app/${TWITCH_STREAM_KEY}`],
       "ffmpeg-start-twitch"
-    ));
+    );
   }
   if (youtube) {
     if (!YOUTUBE_STREAM_KEY) return res.status(500).send("❌ YOUTUBE_STREAM_KEY fehlt");
-    jobs.push(spawnFfmpeg(
+    spawnFfmpegDetached(
       ["-re", "-i", inputUrl, "-c", "copy", "-f", "flv", `rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}`],
       "ffmpeg-start-youtube"
-    ));
+    );
   }
 
   res.send(`🚀 Weiterleitung gestartet von '${input}' (${inputUrl}) → ${[
@@ -159,24 +151,22 @@ app.post("/start", async (req, res) => {
   ].filter(Boolean).join(" & ")}`);
 });
 
-// BRB-Video direkt zu Twitch/YouTube pushen
+// BRB direkt pushen
 app.post("/stop", (_req, res) => {
   if (!TWITCH_STREAM_KEY && !YOUTUBE_STREAM_KEY) {
     return res.status(500).send("❌ Keine Ziel-Keys vorhanden");
   }
 
-  // Alte Weiterleitungen stoppen
   killFFmpeg();
 
-  // BRB-Job(s) starten
   if (TWITCH_STREAM_KEY) {
-    spawnFfmpeg(
+    spawnFfmpegDetached(
       ["-re", "-stream_loop", "-1", "-i", "/ffmpeg/brb.mp4", "-c", "copy", "-f", "flv", `rtmp://live.twitch.tv/app/${TWITCH_STREAM_KEY}`],
       "ffmpeg-brb-twitch"
     );
   }
   if (YOUTUBE_STREAM_KEY) {
-    spawnFfmpeg(
+    spawnFfmpegDetached(
       ["-re", "-stream_loop", "-1", "-i", "/ffmpeg/brb.mp4", "-c", "copy", "-f", "flv", `rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}`],
       "ffmpeg-brb-youtube"
     );
@@ -185,7 +175,7 @@ app.post("/stop", (_req, res) => {
   res.send(`🛑 BRB gestartet (${buildBrbInputUrl()})`);
 });
 
-// Kompatibilität: /switch -> /start
+// Kompatibilität
 app.post("/switch", (req, res) => {
   const { input } = req.body || {};
   if (!input) return res.status(400).send("❌ input fehlt");
