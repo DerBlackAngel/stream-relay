@@ -1,6 +1,5 @@
 version: "3.9"
 
-name: stream-relay
 services:
   nginx-rtmp:
     image: tiangolo/nginx-rtmp
@@ -67,6 +66,12 @@ services:
     build: ./stream-guard
     container_name: stream-guard
     restart: unless-stopped
+    environment:
+      - SG_POLL_MS=5000
+      - SG_FAIL_THRESHOLD=2
+      - SG_COOLDOWN_MS=10000
+      - SG_PANEL_TIMEOUT_MS=10000
+      - SG_PANEL_RETRIES=3
     depends_on: [ ffmpeg-runner, ffmpeg-loop ]
     networks: [ relay-net ]
     volumes:

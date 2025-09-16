@@ -7,26 +7,23 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
 // Healthcheck
-app.get("/health", (req, res) => {
+app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "auth-server" });
 });
 
-/**
- * NGINX-RTMP Hooks (allow-all)
- * Viele Configs nutzen on_publish (oder on_play, on_done usw.).
- * Solange wir debuggen, geben wir IMMER 200 zurück, damit OBS connecten darf.
- * Später bauen wir hier echte Prüfungen (Token, App-Name, IP-Whitelist, etc.).
- */
+// Allow-all Handler (zum Debuggen; gibt immer 200 zurück)
 const ok = (req, res) => {
-  console.log(`[RTMP-HOOK] ${req.path} ${req.method} query=`, req.query, " body=", req.body);
+  console.log(`[RTMP-HOOK] ${req.method} ${req.originalUrl} | query=`, req.query, "| body=", req.body);
   res.status(200).send("OK");
 };
 
-app.all("/auth", ok);
+// Wichtig: alle Varianten matchen – exakt wie NGINX aufruft
+app.all(/^\/auth(\/.*)?$/, ok);          // /auth  und /auth/dennis  /auth/auria ...
 app.all("/on_publish", ok);
 app.all("/on_done", ok);
 app.all("/on_play", ok);
 app.all("/on_publish_done", ok);
+app.all("/on_play_done", ok);
 
 const PORT = 3000;
 app.listen(PORT, () => {
