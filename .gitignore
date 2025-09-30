@@ -18,3 +18,5 @@ docker-data/
 *.pid
 # Media & temp
 ffmpeg/brb.mp4
+.env
+node_modules/
