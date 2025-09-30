@@ -1,0 +1,31 @@
+version: "3.8"
+
+networks:
+  relay: {}
+
+services:
+  panel-server:
+    networks:
+      - relay
+
+  stream-guard:
+    depends_on:
+      - panel-server
+    networks:
+      - relay
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - STAT_URL=http://nginx-rtmp:18080/stat
+      # Host-Port zuerst (bewährt bei dir):
+      - PANEL_BASE_URL=http://host.docker.internal:8080
+      - PANEL_USER=${PANEL_USER}
+      - PANEL_PASS=${PANEL_PASS}
+      - HTTP_TIMEOUT_MS=4000
+      - GUARD_POLL_MS=5000
+      - GUARD_INACTIVE_THRESHOLD=3
+      - GUARD_MIN_DELTA_BYTES=40000
+      - GUARD_AUTO_RESUME=true
+      - GUARD_RESUME_STABLE_MS=5000
+      - GUARD_RESUME_COOLDOWN_MS=60000
+

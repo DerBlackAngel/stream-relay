@@ -1,0 +1,234 @@
+/* eslint-disable no-console */
+"use strict";
+
+/**
+ * Stream-Guard v4.1 — Auto-Resume + Anti-Ping-Pong + optional Basic-Auth fürs Panel
+ *
+ * - Fallback auf BRB, wenn aktive Quelle "tot" (n Polls ohne bytes_in-Delta)
+ * - Auto-Resume aus BRB, wenn eine Quelle stabil "lebt"
+ * - Hysterese + Cooldown gegen Ping-Pong
+ * - Optional: Basic-Auth zu PANEL (/api/current, /api/switch) via PANEL_USER/PANEL_PASS
+ *
+ * Laufzeit: Node 18+ (global fetch verfügbar)
+ */
+
+const STAT_URL = process.env.STAT_URL || "http://nginx-rtmp:18080/stat";
+const PANEL_BASE_URL = process.env.PANEL_BASE_URL || "http://panel-server:8080";
+
+const GUARD_POLL_MS = intEnv(process.env.GUARD_POLL_MS, 5000);
+const GUARD_INACTIVE_THRESHOLD = intEnv(process.env.GUARD_INACTIVE_THRESHOLD, 3);
+const GUARD_MIN_DELTA_BYTES = intEnv(process.env.GUARD_MIN_DELTA_BYTES, 40000);
+
+const GUARD_AUTO_RESUME = boolEnv(process.env.GUARD_AUTO_RESUME, true);
+const GUARD_RESUME_STABLE_MS = intEnv(process.env.GUARD_RESUME_STABLE_MS, 5000);
+const GUARD_RESUME_COOLDOWN_MS = intEnv(process.env.GUARD_RESUME_COOLDOWN_MS, 60000);
+
+const SOURCES = ["dennis", "auria", "mobil"];
+
+// Optionales Basic-Auth fürs Panel
+const PANEL_USER = envStr(process.env.PANEL_USER, null);
+const PANEL_PASS = envStr(process.env.PANEL_PASS, null);
+const BASIC_AUTH =
+  PANEL_USER && PANEL_PASS
+    ? "Basic " + Buffer.from(`${PANEL_USER}:${PANEL_PASS}`).toString("base64")
+    : null;
+
+let lastBytes = Object.fromEntries(SOURCES.map((s) => [s, 0]));
+let resumeCounters = Object.fromEntries(SOURCES.map((s) => [s, 0]));
+let inactiveCount = 0;
+let lastSelected = null;
+let lastResumeAt = 0;
+let warnedAuth = false; // nur einmalige Warnungen
+
+log(
+  `🛡️ Stream-Guard gestartet: Intervall=${GUARD_POLL_MS}ms, Threshold=${GUARD_INACTIVE_THRESHOLD}x, MinDelta=${GUARD_MIN_DELTA_BYTES}, AutoResume=${GUARD_AUTO_RESUME}, Stable=${GUARD_RESUME_STABLE_MS}ms, Cooldown=${GUARD_RESUME_COOLDOWN_MS}ms`
+);
+
+init().then(() => {
+  setInterval(() => {
+    tick().catch((e) => log("! tick error:", e?.message || e));
+  }, GUARD_POLL_MS);
+});
+
+async function init() {
+  const cur = await getCurrentMode();
+  if (SOURCES.includes(cur)) lastSelected = cur;
+  log(`ℹ️ Initial mode = ${cur || "unknown"}, lastSelected = ${lastSelected || "-"}`);
+}
+
+async function tick() {
+  const xml = await fetchText(STAT_URL);
+  const alive = {};
+  for (const s of SOURCES) {
+    const { publisher, bytesSum } = parseApplication(xml, s);
+    const delta = Math.max(0, bytesSum - (lastBytes[s] || 0));
+    lastBytes[s] = bytesSum;
+    alive[s] = !!publisher && delta >= GUARD_MIN_DELTA_BYTES;
+  }
+
+  const mode = await getCurrentMode();
+
+  if (SOURCES.includes(mode)) {
+    lastSelected = mode;
+    if (alive[mode]) {
+      inactiveCount = 0;
+    } else {
+      inactiveCount++;
+      log(`… ${mode} scheint tot (${inactiveCount}/${GUARD_INACTIVE_THRESHOLD})`);
+      if (inactiveCount >= GUARD_INACTIVE_THRESHOLD) {
+        await switchTo("brb", `inactive_${mode}_${inactiveCount}x`);
+        inactiveCount = 0;
+      }
+    }
+    resetResumeCounters();
+    return;
+  }
+
+  if (mode === "brb" && GUARD_AUTO_RESUME) {
+    const now = Date.now();
+    if (now - lastResumeAt < GUARD_RESUME_COOLDOWN_MS) return;
+
+    for (const s of SOURCES) resumeCounters[s] = alive[s] ? resumeCounters[s] + 1 : 0;
+
+    const needed = Math.max(1, Math.ceil(GUARD_RESUME_STABLE_MS / GUARD_POLL_MS));
+    const order = lastSelected
+      ? [lastSelected, ...SOURCES.filter((x) => x !== lastSelected)]
+      : [...SOURCES];
+
+    let candidate = null;
+    for (const s of order) {
+      if (resumeCounters[s] >= needed) {
+        candidate = s;
+        break;
+      }
+    }
+
+    if (candidate) {
+      await switchTo(candidate, `auto_resume_${resumeCounters[candidate]}x`);
+      lastResumeAt = now;
+      resetResumeCounters();
+    }
+    return;
+  }
+
+  resetResumeCounters();
+  inactiveCount = 0;
+}
+
+/* ----------------- Panel/HTTP Helpers ----------------- */
+
+function commonHeaders(json = false) {
+  const h = {};
+  if (json) h["Content-Type"] = "application/json";
+  h["Accept"] = "application/json";
+  if (BASIC_AUTH) h["Authorization"] = BASIC_AUTH;
+  return h;
+}
+
+async function getCurrentMode() {
+  try {
+    const res = await fetch(`${PANEL_BASE_URL}/api/current`, {
+      method: "GET",
+      headers: commonHeaders(false),
+    });
+    if (!res.ok) {
+      const body = await safeText(res);
+      warnOnceAuth(res.status, body);
+      return "unknown";
+    }
+    const j = await res.json().catch(() => ({}));
+    return j?.mode || "unknown";
+  } catch (e) {
+    log(`! /api/current error: ${e?.message || e}`);
+    return "unknown";
+  }
+}
+
+async function switchTo(target, reason) {
+  try {
+    const res = await fetch(`${PANEL_BASE_URL}/api/switch`, {
+      method: "POST",
+      headers: commonHeaders(true),
+      body: JSON.stringify({ source: target, reason: `guard:${reason}` }),
+    });
+    const ok = res.ok;
+    const j = await res.json().catch(() => ({}));
+    if (!ok) {
+      const txt = JSON.stringify(j || {});
+      log(`! switch ${target} (${reason}) HTTP ${res.status} ${txt.slice(0, 200)}`);
+    } else {
+      log(`→ switch ${target} (${reason})`, j?.ok ? "ok" : "");
+    }
+  } catch (e) {
+    log(`! switch ${target} failed: ${e?.message || e}`);
+  }
+}
+
+function warnOnceAuth(status, body) {
+  if (warnedAuth) return;
+  if (status === 401 || status === 403) {
+    warnedAuth = true;
+    log(
+      `! Panel-Auth nötig (HTTP ${status}). Setze PANEL_USER/PANEL_PASS für den Guard.`,
+      body ? `Body: ${String(body).slice(0, 200)}` : ""
+    );
+  }
+}
+
+async function fetchText(url) {
+  const res = await fetch(url, { method: "GET" });
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  return res.text();
+}
+async function safeText(res) {
+  try {
+    return await res.text();
+  } catch {
+    return "";
+  }
+}
+
+/* ----------------- XML Parsing ----------------- */
+
+function parseApplication(xml, appName) {
+  const appRe = new RegExp(
+    `<application\\s+name="${escapeRe(appName)}">([\\s\\S]*?)<\\/application>`,
+    "i"
+  );
+  const m = xml.match(appRe);
+  if (!m) return { publisher: false, bytesSum: 0 };
+
+  const block = m[1];
+  const hasPublisher = /<publisher>/i.test(block) || /<stream>/i.test(block);
+
+  let bytesSum = 0;
+  const it = block.matchAll(/<bytes_in>(\d+)<\/bytes_in>/gi);
+  for (const g of it) bytesSum += parseInt(g[1], 10);
+
+  return { publisher: hasPublisher, bytesSum };
+}
+
+/* ----------------- Utils ----------------- */
+
+function escapeRe(s) {
+  return s.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+}
+function intEnv(v, d) {
+  const n = parseInt(v ?? "", 10);
+  return Number.isFinite(n) ? n : d;
+}
+function boolEnv(v, dflt) {
+  if (v == null) return dflt;
+  const s = String(v).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(s)) return true;
+  if (["0", "false", "no", "off"].includes(s)) return false;
+  return dflt;
+}
+function envStr(v, d) {
+  if (v == null) return d;
+  const s = String(v).trim();
+  return s.length ? s : d;
+}
+function log(...args) {
+  console.log(new Date().toISOString(), ...args);
+}
