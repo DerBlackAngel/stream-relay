@@ -1,239 +1,248 @@
+// Stream Control Panel Backend (Container-basierter Push, mit /api/current)
+// - /api/status  : nginx-rtmp /stat (Publisher + Bytes)
+// - /api/who     : Status + Logs des Containers "twitch-push" (auch wenn Exited)
+// - /api/stop    : docker rm -f twitch-push
+// - /api/switch  : Stop → docker run -d twitch-push mit ffmpeg-Command (über bash -lc)
+// - /api/current : ermittelt aktuelles Push-Target (brb|dennis|auria|mobil|idle|unknown)
+// - /api/diag    : Docker/Network-Diagnose
+
 const express = require("express");
-const { spawn } = require("child_process");
-const cors = require("cors");
 const path = require("path");
-const axios = require("axios");
-const xml2js = require("xml2js");
+const { exec } = require("child_process");
+
+const PORT = Number(process.env.PORT || 4000);
+const NGINX_STAT_URL = process.env.NGINX_STAT_URL || "http://nginx-rtmp:18080/stat";
+
+// Keys/URL aus ENV (Panel-Container liest .env via compose)
+const TWITCH_RTMP_URL = process.env.TWITCH_RTMP_URL || "";
+const DENNIS = process.env.DENNIS || "";
+const AURIA  = process.env.AURIA  || "";
+const MOBIL  = process.env.MOBIL  || "";
+
+// Optionales Basic-Auth
+const PANEL_USER = process.env.PANEL_USER || "";
+const PANEL_PASS = process.env.PANEL_PASS || "";
 
 const app = express();
-const PORT = 4000;
-
-const TWITCH_STREAM_KEY = process.env.TWITCH_STREAM_KEY || "";
-const YOUTUBE_STREAM_KEY = process.env.YOUTUBE_STREAM_KEY || "";
-
-app.use(cors());
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, "public")));
 
-// ------------------ Helpers ------------------
-
-async function fetchStatXml() {
-  const response = await axios.get("http://nginx-rtmp:8080/stat");
-  return xml2js.parseStringPromise(response.data);
-}
-function findApp(result, appName) {
-  const apps = result?.rtmp?.server?.[0]?.application || [];
-  return apps.find(a => a.name?.[0] === appName) || null;
-}
-function getFirstStreamNameFromApp(appNode) {
-  const streams = appNode?.live?.[0]?.stream || [];
-  if (!streams.length) return null;
-  return streams[0]?.name?.[0] || null;
-}
-function buildInputUrl(appName, streamName) {
-  return `rtmp://nginx-rtmp:1935/${appName}/${streamName}`;
-}
-function buildBrbInputUrl() {
-  return "rtmp://nginx-rtmp:1935/live/brb";
-}
-
-function runDocker(args, label) {
-  const p = spawn("docker", args, { stdio: "ignore" });
-  p.on("exit", (code, signal) => {
-    console.log(`ℹ️ docker ${label} exit=${code} signal=${signal ?? "none"}`);
-  });
-  return p;
-}
-function runDockerCollect(args) {
-  return new Promise((resolve) => {
-    const p = spawn("docker", args);
-    let out = "", err = "";
-    p.stdout.on("data", d => out += d.toString());
-    p.stderr.on("data", d => err += d.toString());
-    p.on("exit", (code) => resolve({ code, out: out.trim(), err: err.trim() }));
+if (PANEL_USER && PANEL_PASS) {
+  app.use((req, res, next) => {
+    const hdr = req.headers.authorization || "";
+    const token = hdr.startsWith("Basic ") ? hdr.slice(6) : "";
+    const decoded = Buffer.from(token, "base64").toString();
+    if (decoded === `${PANEL_USER}:${PANEL_PASS}`) return next();
+    res.setHeader("WWW-Authenticate", 'Basic realm="stream-panel"');
+    return res.status(401).send("Auth required");
   });
 }
 
-// ffmpeg-Prozesse im Runner zählen (optional Filter auf Ziel)
-async function countFfmpeg(filter = "") {
-  const { out } = await runDockerCollect([
-    "exec", "ffmpeg-runner", "sh", "-lc",
-    `pgrep -fa ffmpeg ${filter ? `| grep '${filter.replace(/'/g, "'\\''")}'` : ""} | wc -l`
-  ]);
-  return parseInt(out || "0", 10);
-}
+app.get("/health", (_req, res) => res.json({ ok: true, service: "panel-server" }));
 
-// alle ffmpeg killen und wirklich warten, bis 0 laufen
-async function killFFmpegAndWait() {
-  await runDockerCollect(["exec", "-d", "ffmpeg-runner", "pkill", "-9", "ffmpeg"]);
-  // Poll bis 0, max ~3s
-  for (let i = 0; i < 15; i++) {
-    const n = await countFfmpeg();
-    if (n === 0) return;
-    await new Promise(r => setTimeout(r, 200));
-  }
-}
-
-// detached ffmpeg mit Logging
-let lastLogFile = null;
-function spawnFfmpegDetachedWithLog(ffArgs, label) {
-  const stamp = Date.now();
-  const logFile = `/tmp/relay-${stamp}-${label}.log`;
-  lastLogFile = logFile;
-  const cmd = `exec ffmpeg -nostdin -loglevel verbose ${ffArgs.join(" ")} >> ${logFile} 2>&1 &`;
-  const full = ["exec", "-d", "ffmpeg-runner", "sh", "-lc", cmd];
-  console.log(`$ docker ${full.join(" ")}`);
-  return runDocker(full, label);
-}
-
-// kleine Wartehilfe
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-// ------------------ Routes ------------------
-
-app.get("/health", (_req, res) => {
-  res.json({
-    ok: true,
-    service: "panel-server",
-    twitchKeyLoaded: !!TWITCH_STREAM_KEY,
-    youtubeKeyLoaded: !!YOUTUBE_STREAM_KEY
-  });
-});
-
-app.get("/status", async (_req, res) => {
-  try {
-    const result = await fetchStatXml();
-    const dennisApp = findApp(result, "dennis");
-    const auriaApp  = findApp(result, "auria");
-    const mobilApp  = findApp(result, "mobil");
-    const liveApp   = findApp(result, "live");
-    const anyStream = a => !!(a?.live?.[0]?.stream || []).length;
-    res.json({
-      dennis: anyStream(dennisApp),
-      auria:  anyStream(auriaApp),
-      mobil:  anyStream(mobilApp),
-      live:   anyStream(liveApp)
+// ---------- Helpers ----------
+function sh(cmd) {
+  return new Promise((resolve, reject) => {
+    exec(cmd, { maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        const msg = (stderr || err.message || "").toString().trim();
+        console.error("[CMD FAIL]", cmd, "\n=>", msg);
+        return reject(new Error(msg || "command failed"));
+      }
+      resolve((stdout || "").toString().trim());
     });
-  } catch (err) {
-    console.error("Fehler beim Parsen von RTMP-Stat:", err.message);
-    res.status(500).json({ error: "Fehler beim Laden der Stream-Status" });
+  });
+}
+const toNum = (x) => (Number.isFinite(+x) ? +x : 0);
+const esc = (s) => String(s).replace(/'/g, `'\\''`);
+
+// nginx-rtmp Parser (Publisher & Bytes)
+function hasPublisher(block) {
+  const rx = /<publisher>[\s\S]*?<\/publisher>|<publishing\s*\/>|<publishing>\s*1\s*<\/publishing>|<type>\s*publisher\s*<\/type>/i;
+  return rx.test(block);
+}
+function parseAppBlock(block) {
+  let publisher = false, nclients = 0, bytesIn = 0, bytesOut = 0;
+  const rxStream = /<stream>([\s\S]*?)<\/stream>/g;
+  let m, any = false;
+  while ((m = rxStream.exec(block))) {
+    any = true;
+    const s = m[1];
+    if (hasPublisher(s)) publisher = true;
+    nclients += toNum((s.match(/<nclients>(\d+)<\/nclients>/) || [])[1]);
+    bytesIn  += toNum((s.match(/<bytes_in>(\d+)<\/bytes_in>/)   || [])[1]);
+    bytesOut += toNum((s.match(/<bytes_out>(\d+)<\/bytes_out>/) || [])[1]);
   }
-});
+  if (!any) {
+    if (hasPublisher(block)) publisher = true;
+    nclients = toNum((block.match(/<nclients>(\d+)<\/nclients>/) || [])[1]);
+    bytesIn  = toNum((block.match(/<bytes_in>(\d+)<\/bytes_in>/)   || [])[1]);
+    bytesOut = toNum((block.match(/<bytes_out>(\d+)<\/bytes_out>/) || [])[1]);
+  }
+  return { publisher, nclients, bytesIn, bytesOut };
+}
+function parseApplications(xml) {
+  const apps = {};
+  const rxApp = /<application>([\s\S]*?)<\/application>/g;
+  let m;
+  while ((m = rxApp.exec(xml))) {
+    const block = m[1];
+    const name = (block.match(/<name>([^<]+)<\/name>/) || [])[1];
+    if (!name) continue;
+    apps[name] = parseAppBlock(block);
+  }
+  return apps;
+}
+function buildStatus(xml) {
+  const apps = parseApplications(xml);
+  const safe = (n) => apps[n] || { publisher: false, nclients: 0, bytesIn: 0, bytesOut: 0 };
+  return { dennis: safe("dennis"), auria: safe("auria"), mobil: safe("mobil") };
+}
 
-// Letzte ffmpeg-Logs aus dem Runner (tail)
-app.get("/ffmpeg/lastlog", async (_req, res) => {
-  if (!lastLogFile) return res.status(404).send("no log yet");
-  const { out, err } = await runDockerCollect([
-    "exec", "ffmpeg-runner", "sh", "-lc", `test -f ${lastLogFile} && tail -n 200 ${lastLogFile} || echo 'no log file'`
-  ]);
-  res.type("text/plain").send(out || err || "");
-});
+async function getRelayNet() {
+  const out = await sh("docker network ls --format '{{.Name}}'");
+  const lines = out.split("\n").map(s=>s.trim()).filter(Boolean);
+  return lines.find(n => n === "stream-relay_relay-net")
+      || lines.find(n => /_relay-net$/.test(n))
+      || "bridge";
+}
 
-// Debug: laufende ffmpeg sehen
-app.get("/ffmpeg/pids", async (_req, res) => {
-  const { out } = await runDockerCollect([
-    "exec", "ffmpeg-runner", "sh", "-lc", "pgrep -fa ffmpeg || true"
-  ]);
-  res.type("text/plain").send(out || "(none)");
-});
+function buildFfmpegCmd(source) {
+  if (!TWITCH_RTMP_URL) throw new Error("TWITCH_RTMP_URL not set");
 
-// Start mit Auto-Detect + strikter Ein-/Ausschalt-Sequenz
-app.post("/start", async (req, res) => {
-  const { input, twitch = true, youtube = false } = req.body || {};
-  if (!input) return res.status(400).send("❌ 'input' fehlt");
-  const allowed = ["dennis", "auria", "mobil", "brb", "live"];
-  if (!allowed.includes(input)) return res.status(400).send("❌ Ungültiger Input");
-  if (!twitch && !youtube) return res.status(400).send("❌ Kein Ziel ausgewählt");
+  // Sichtbare Logs: -nostdin -loglevel info -progress pipe:2
+  if (source === "brb") {
+    return [
+      "set -euxo pipefail;",
+      "ffmpeg -nostdin -hide_banner -loglevel info",
+      "-progress pipe:2",
+      "-re -stream_loop -1 -i /work/brb.mp4",
+      "-c:v copy -c:a aac -ar 44100 -b:a 128k",
+      "-f flv", `'${esc(TWITCH_RTMP_URL)}'`
+    ].join(" ");
+  }
 
-  let inputUrl;
+  const MAP = { dennis: DENNIS, auria: AURIA, mobil: MOBIL };
+  const key = MAP[source];
+  if (!key) throw new Error(`missing key for ${source}`);
+
+  const input = `rtmp://nginx-rtmp:1935/${source}/${key}`;
+  return [
+    "set -euxo pipefail;",
+    "ffmpeg -nostdin -hide_banner -loglevel info",
+    "-progress pipe:2",
+    "-re -i", `'${esc(input)}'`,
+    "-c:v copy -c:a aac -ar 44100 -b:a 128k",
+    "-f flv", `'${esc(TWITCH_RTMP_URL)}'`
+  ].join(" ");
+}
+
+async function stopPushContainer() {
+  await sh("docker rm -f twitch-push 2>/dev/null || true");
+}
+
+async function startPushContainer(source) {
+  const net = await getRelayNet();
+  const cmd = buildFfmpegCmd(source);
+  // ENTRYPOINT überschreiben → /bin/bash -lc '<cmd>'
+  const run = [
+    "docker run -d --name twitch-push",
+    `--network ${net}`,
+    "-v /opt/stream-relay/ffmpeg:/work:ro",
+    "--entrypoint /bin/bash",
+    "jrottenberg/ffmpeg:4.4-ubuntu",
+    "-lc",
+    `'${esc(cmd)}'`
+  ].join(" ");
+  return await sh(run);
+}
+
+// ---------- API ----------
+app.get("/api/status", async (_req, res) => {
   try {
-    if (["dennis", "auria", "mobil"].includes(input)) {
-      const result = await fetchStatXml();
-      const appNode = findApp(result, input);
-      const streamName = getFirstStreamNameFromApp(appNode);
-      inputUrl = streamName ? buildInputUrl(input, streamName) : buildBrbInputUrl();
-      console.log(streamName
-        ? `📡 Quelle: ${inputUrl}`
-        : `⚠️ Kein aktiver Stream bei '${input}' – Fallback: BRB (${inputUrl})`);
-    } else {
-      inputUrl = buildBrbInputUrl();
-      console.log(`📼 Quelle: BRB (${inputUrl})`);
-    }
+    const r = await fetch(NGINX_STAT_URL);
+    if (!r.ok) throw new Error(`/stat ${r.status}`);
+    const xml = await r.text();
+    return res.json({ ok: true, stat: buildStatus(xml) });
   } catch (e) {
-    console.error("❌ Fehler beim Ermitteln des Inputs:", e.message);
-    inputUrl = buildBrbInputUrl();
+    return res.status(500).json({ ok: false, error: String(e.message || e) });
   }
-
-  // 1) sicher alles stoppen
-  await killFFmpegAndWait();
-  // 2) Twitch/YT-Session freigeben lassen
-  await sleep(2000);
-
-  // 3) starten
-  if (twitch) {
-    if (!TWITCH_STREAM_KEY) return res.status(500).send("❌ TWITCH_STREAM_KEY fehlt");
-    spawnFfmpegDetachedWithLog(
-      ["-re", "-rtmp_live", "live", "-i", inputUrl, "-c", "copy", "-f", "flv",
-       `rtmp://live.twitch.tv/app/${TWITCH_STREAM_KEY}`],
-      "start-twitch"
-    );
-  }
-  if (youtube) {
-    if (!YOUTUBE_STREAM_KEY) return res.status(500).send("❌ YOUTUBE_STREAM_KEY fehlt");
-    spawnFfmpegDetachedWithLog(
-      ["-re", "-rtmp_live", "live", "-i", inputUrl, "-c", "copy", "-f", "flv",
-       `rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}`],
-      "start-youtube"
-    );
-  }
-
-  res.send(`🚀 Weiterleitung gestartet von '${input}' (${inputUrl}) → ${[
-    twitch ? "Twitch" : null,
-    youtube ? "YouTube" : null
-  ].filter(Boolean).join(" & ")}`);
 });
 
-// BRB direkt pushen – auch mit sauberem Kill/Wait
-app.post("/stop", async (_req, res) => {
-  if (!TWITCH_STREAM_KEY && !YOUTUBE_STREAM_KEY) {
-    return res.status(500).send("❌ Keine Ziel-Keys vorhanden");
+app.get("/api/who", async (_req, res) => {
+  try {
+    const ps = await sh("docker ps -a --filter name=twitch-push --format '{{.ID}} {{.Image}} {{.Status}}'");
+    const logs = await sh("docker logs --tail 200 twitch-push 2>/dev/null || true");
+    return res.json({ ok: true, container: ps, logs });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e.message || e) });
   }
-  await killFFmpegAndWait();
-  await sleep(500);
-
-  if (TWITCH_STREAM_KEY) {
-    spawnFfmpegDetachedWithLog(
-      ["-re", "-stream_loop", "-1", "-i", "/ffmpeg/brb.mp4", "-c", "copy", "-f", "flv",
-       `rtmp://live.twitch.tv/app/${TWITCH_STREAM_KEY}`],
-      "brb-twitch"
-    );
-  }
-  if (YOUTUBE_STREAM_KEY) {
-    spawnFfmpegDetachedWithLog(
-      ["-re", "-stream_loop", "-1", "-i", "/ffmpeg/brb.mp4", "-c", "copy", "-f", "flv",
-       `rtmp://a.rtmp.youtube.com/live2/${YOUTUBE_STREAM_KEY}`],
-      "brb-youtube"
-    );
-  }
-
-  res.send(`🛑 BRB gestartet (${buildBrbInputUrl()})`);
 });
 
-// Kompatibilität
-app.post("/switch", (req, res) => {
-  const { input } = req.body || {};
-  if (!input) return res.status(400).send("❌ input fehlt");
-  if (input === "brb") {
-    req.url = "/stop";
-    return app._router.handle(req, res);
+// NEU: Aktuelle Quelle erkennen (Cmd/Entrypoint inspizieren)
+async function currentMode() {
+  const cfgJson = await sh("docker inspect twitch-push --format '{{json .Config}}' 2>/dev/null || true");
+  if (!cfgJson) return { mode: "idle" };
+  let cfg;
+  try { cfg = JSON.parse(cfgJson); } catch { return { mode: "unknown" }; }
+  const entry = Array.isArray(cfg.Entrypoint) ? cfg.Entrypoint.join(" ") : (cfg.Entrypoint || "");
+  const cmdArr = Array.isArray(cfg.Cmd) ? cfg.Cmd : (cfg.Cmd ? [cfg.Cmd] : []);
+  const cmd = cmdArr.join(" ");
+  const full = [entry, cmd].filter(Boolean).join(" ");
+  if (/\/work\/brb\.mp4/.test(full)) return { mode: "brb", cmd: full };
+  if (/rtmp:\/\/nginx-rtmp:1935\/dennis\//.test(full)) return { mode: "dennis", cmd: full };
+  if (/rtmp:\/\/nginx-rtmp:1935\/auria\//.test(full))  return { mode: "auria",  cmd: full };
+  if (/rtmp:\/\/nginx-rtmp:1935\/mobil\//.test(full))  return { mode: "mobil",  cmd: full };
+  return { mode: "unknown", cmd: full };
+}
+
+app.get("/api/current", async (_req, res) => {
+  try {
+    const cur = await currentMode();
+    return res.json({ ok: true, ...cur });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e.message || e) });
   }
-  req.body.twitch = req.body.twitch ?? true;
-  req.body.youtube = req.body.youtube ?? false;
-  req.url = "/start";
-  return app._router.handle(req, res);
 });
+
+app.post("/api/stop", async (_req, res) => {
+  try {
+    await stopPushContainer();
+    return res.json({ ok: true, stopped: true });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+app.post("/api/switch", async (req, res) => {
+  try {
+    const src = String((req.body && req.body.source) || "").toLowerCase();
+    if (!["dennis", "auria", "mobil", "brb"].includes(src)) {
+      return res.status(400).json({ ok: false, error: "invalid source" });
+    }
+    await stopPushContainer();
+    const id = await startPushContainer(src);
+    return res.json({ ok: true, switched: src, container: id });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+app.get("/api/diag", async (_req, res) => {
+  try {
+    const which = await sh("which docker || true");
+    const sock  = await sh("ls -l /var/run/docker.sock || true");
+    const net   = await getRelayNet();
+    const top   = await sh("docker ps -a --filter name=twitch-push --format '{{.ID}} {{.Image}} {{.Status}}' || true");
+    return res.json({ ok: true, docker: which || "(not found)", sock, network: net, push: top });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+// Static UI
+app.use(express.static(path.join(__dirname, "public")));
 
 app.listen(PORT, () => {
   console.log(`✅ panel-server läuft auf Port ${PORT}`);
+  console.log(`   NGINX_STAT_URL = ${NGINX_STAT_URL}`);
 });

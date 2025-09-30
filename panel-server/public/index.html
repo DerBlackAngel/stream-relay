@@ -1,86 +1,138 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="de">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Stream Control Panel</title>
   <style>
-    body { font-family: sans-serif; background:#111; color:#fff; padding:20px; }
-    .input-status { display:flex; gap:1rem; margin-bottom:1rem; }
-    .status { display:flex; align-items:center; gap:0.5rem; }
-    .dot { width:15px; height:15px; border-radius:50%; background-color:grey; }
-    .dot.green { background-color:limegreen; }
-    .dot.red { background-color:red; }
-    button { padding:10px; margin:0.3rem; font-size:1rem; cursor:pointer; }
-    .panel { margin-top:2rem; }
+    :root { --bg:#0b0f14; --card:#121821; --muted:#8aa0b4; --ok:#16a34a; --bad:#ef4444; --warn:#f59e0b; }
+    * { box-sizing: border-box; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Arial, sans-serif; }
+    body { margin: 0; background: var(--bg); color: #e5eef7; }
+    header { padding: 16px 20px; background: #0e1420; border-bottom: 1px solid #0f1b2b; position: sticky; top: 0; }
+    h1 { margin: 0; font-size: 18px; }
+    main { padding: 20px; display: grid; gap: 16px; grid-template-columns: 1fr; max-width: 980px; margin: 0 auto; }
+    .row { display: grid; gap: 16px; grid-template-columns: 1fr; }
+    @media (min-width: 960px) { .row { grid-template-columns: 1fr 1fr; } }
+    .card { background: var(--card); border: 1px solid #182234; border-radius: 14px; padding: 16px; }
+    .section-title { font-size: 14px; color: var(--muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: .08em; }
+    .app { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid #172132; }
+    .app:first-child { border-top: none; }
+    .dot { width: 14px; height: 14px; border-radius: 50%; background: #475569; box-shadow: 0 0 0 2px #0e1624 inset; }
+    .dot.on { background: var(--ok); }
+    .dot.off { background: var(--bad); }
+    .name { font-weight: 600; letter-spacing: .02em; }
+    .meta { font-size: 12px; color: var(--muted); }
+    .btnbar { display: flex; flex-wrap: wrap; gap: 8px; }
+    button { background: #1b2639; color: #e5eef7; border: 1px solid #23324a; padding: 10px 12px; border-radius: 10px; cursor: pointer; font-weight: 600; }
+    button:hover { background: #23324a; }
+    button.primary { background: #1f2e47; border-color: #294066; }
+    .log { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; background: #0a0f18; border: 1px solid #132036; border-radius: 10px; padding: 10px; height: 120px; overflow: auto; white-space: pre-wrap; color: #c7d7ea; }
+    .muted { color: var(--muted); }
+    .row-3 { display: grid; gap: 16px; grid-template-columns: 1fr; }
+    @media (min-width: 960px) { .row-3 { grid-template-columns: 1fr 1fr 1fr; } }
+    .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
   </style>
 </head>
 <body>
-  <h1>🎛️ Stream Control Panel</h1>
+  <header>
+    <h1>Stream Control Panel <span id="tick" class="muted">lädt…</span></h1>
+  </header>
+  <main>
+    <div class="row">
+      <section class="card">
+        <div class="section-title">Quellen-Status (RTMP Eingänge)</div>
+        <div id="apps">
+          <div class="app"><div class="dot" id="dot-dennis"></div><div class="name">Dennis</div><div class="meta" id="meta-dennis">–</div></div>
+          <div class="app"><div class="dot" id="dot-auria"></div><div class="name">Auria</div><div class="meta" id="meta-auria">–</div></div>
+          <div class="app"><div class="dot" id="dot-mobil"></div><div class="name">Mobil</div><div class="meta" id="meta-mobil">–</div></div>
+        </div>
+        <div class="hint">Grün = Publisher aktiv (OBS live). Rot = keine Quelle. Zahlen zeigen <em>nclients</em> und <em>bytes_in</em>.</div>
+      </section>
 
-  <div class="input-status" id="status">
-    <div class="status"><div class="dot" id="dot-dennis"></div> Dennis</div>
-    <div class="status"><div class="dot" id="dot-auria"></div> Auria</div>
-    <div class="status"><div class="dot" id="dot-mobil"></div> Mobil</div>
-  </div>
-
-  <div class="panel">
-    <h2>🎬 Aktiven Stream starten</h2>
-    <select id="input">
-      <option value="dennis">Dennis</option>
-      <option value="auria">Auria</option>
-      <option value="mobil">Mobil</option>
-    </select>
-
-    <label><input type="checkbox" id="twitch" checked /> Twitch</label>
-    <label><input type="checkbox" id="youtube" /> YouTube</label>
-    <br><br>
-    <button onclick="startStream()">🚀 Stream starten</button>
-    <button onclick="stopStream()">🛑 Stop / BRB</button>
-  </div>
+      <section class="card">
+        <div class="section-title">Ausgabe (Twitch Push)</div>
+        <div class="btnbar" style="margin-bottom:8px;">
+          <button class="primary" data-src="dennis">→ Twitch: Dennis</button>
+          <button class="primary" data-src="auria">→ Twitch: Auria</button>
+          <button class="primary" data-src="mobil">→ Twitch: Mobil</button>
+          <button data-src="brb">→ Twitch: BRB</button>
+          <button id="btn-stop">Stop</button>
+        </div>
+        <div class="section-title" style="margin-top:8px">Läuft:</div>
+        <pre id="who" class="log">(keine Daten)</pre>
+        <div class="hint">„Stop“ beendet laufende <code>push.sh</code>. Umschalten stoppt automatisch und startet die gewählte Quelle.</div>
+      </section>
+    </div>
+  </main>
 
   <script>
-    async function fetchStatus() {
+    const $ = (id) => document.getElementById(id);
+    const dot = (el, on) => {
+      el.classList.remove('on','off');
+      el.classList.add(on ? 'on' : 'off');
+    };
+    function fmtBytes(n) {
+      if (!Number.isFinite(n)) return '0 B';
+      const u = ['B','KB','MB','GB','TB']; let i = 0;
+      while (n >= 1024 && i < u.length-1) { n/=1024; i++; }
+      return `${n.toFixed(1)} ${u[i]}`;
+    }
+    async function getJSON(url, opts) {
+      const r = await fetch(url, opts);
+      if (!r.ok) throw new Error(`${url} -> ${r.status}`);
+      return r.json();
+    }
+    async function refresh() {
       try {
-        const res = await fetch("/status");
-        const json = await res.json();
-        updateStatus(json);
-      } catch (err) {
-        console.error("Fehler beim Abrufen des Status:", err);
+        const st = await getJSON('/api/status');
+        const S = st.stat;
+
+        // Dennis
+        dot($('dot-dennis'), S.dennis.publisher);
+        $('meta-dennis').textContent = `clients: ${S.dennis.nclients} | in: ${fmtBytes(S.dennis.bytesIn)} | out: ${fmtBytes(S.dennis.bytesOut)}`;
+        // Auria
+        dot($('dot-auria'), S.auria.publisher);
+        $('meta-auria').textContent = `clients: ${S.auria.nclients} | in: ${fmtBytes(S.auria.bytesIn)} | out: ${fmtBytes(S.auria.bytesOut)}`;
+        // Mobil
+        dot($('dot-mobil'), S.mobil.publisher);
+        $('meta-mobil').textContent = `clients: ${S.mobil.nclients} | in: ${fmtBytes(S.mobil.bytesIn)} | out: ${fmtBytes(S.mobil.bytesOut)}`;
+
+        $('tick').textContent = `aktualisiert ${new Date().toLocaleTimeString()}`;
+      } catch (e) {
+        $('tick').textContent = `Fehler beim Laden`;
+      }
+
+      try {
+        const who = await getJSON('/api/who');
+        $('who').textContent = (who.running || '').trim() || '(kein push.sh aktiv)';
+      } catch {
+        $('who').textContent = '(keine Daten)';
       }
     }
 
-    function updateStatus(data) {
-      const map = { dennis: !!data.dennis, auria: !!data.auria, mobil: !!data.mobil };
-      for (const name of Object.keys(map)) {
-        const dot = document.getElementById("dot-" + name);
-        dot.classList.toggle("green", map[name]);
-        dot.classList.toggle("red", !map[name]);
-      }
-    }
-
-    async function startStream() {
-      const input = document.getElementById("input").value;
-      const twitch = document.getElementById("twitch").checked;
-      const youtube = document.getElementById("youtube").checked;
-
-      const res = await fetch("/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ input, twitch, youtube }),
+    // Buttons
+    document.querySelectorAll('button[data-src]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const src = btn.getAttribute('data-src');
+        try {
+          await fetch('/api/switch', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ source: src })
+          });
+          setTimeout(refresh, 600);
+        } catch {}
       });
-      const text = await res.text();
-      alert(res.ok ? `✅ Umschaltung: ${input}\n${text}` : `❌ Fehler: ${text}`);
-    }
+    });
+    $('btn-stop').addEventListener('click', async () => {
+      try {
+        await fetch('/api/stop', { method: 'POST' });
+        setTimeout(refresh, 400);
+      } catch {}
+    });
 
-    async function stopStream() {
-      const res = await fetch("/stop", { method: "POST" });
-      const text = await res.text();
-      alert(res.ok ? "🛑 BRB aktiv" : `❌ Fehler: ${text}`);
-    }
-
-    setInterval(fetchStatus, 2000);
-    fetchStatus();
+    refresh();
+    setInterval(refresh, 2000);
   </script>
 </body>
 </html>
