@@ -180,7 +180,7 @@ function buildFfmpegCmd(source) {
       "ffmpeg -nostdin -hide_banner -loglevel info",
       "-progress pipe:2",
       "-re -stream_loop -1 -i /work/brb.mp4",
-      "-c:v libx264 -preset veryfast -tune zerolatency -pix_fmt yuv420p -profile:v high -level 4.1 -g 60 -keyint_min 60 -sc_threshold 0 -x264-params keyint=60:min-keyint=60:scenecut=0 -b:v 6000k -maxrate 6000k -bufsize 12000k -c:a aac -ar 44100 -b:a 128k",
+      "-c:v copy -c:a aac -ar 44100 -b:a 128k",
       "-f flv",
       `'${esc(TWITCH_RTMP_URL)}'`,
     ].join(" ");
@@ -197,7 +197,7 @@ function buildFfmpegCmd(source) {
     "-progress pipe:2",
     "-re -i",
     `'${esc(input)}'`,
-    "-c:v libx264 -preset veryfast -tune zerolatency -pix_fmt yuv420p -profile:v high -level 4.1 -g 60 -keyint_min 60 -sc_threshold 0 -x264-params keyint=60:min-keyint=60:scenecut=0 -b:v 6000k -maxrate 6000k -bufsize 12000k -c:a aac -ar 44100 -b:a 128k",
+    "-c:v copy -c:a aac -ar 44100 -b:a 128k",
     "-f flv",
     `'${esc(TWITCH_RTMP_URL)}'`,
   ].join(" ");
