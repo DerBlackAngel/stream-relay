@@ -2,191 +2,186 @@
 <html lang="de">
 <head>
   <meta charset="utf-8" />
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1, maximum-scale=1"
-  />
-  <title>Stream Relay – Panel</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stream Relay Panel</title>
   <style>
-    :root {
-      --bg: #0b0f14;
-      --card: #141a22;
-      --muted: #8aa0b4;
-      --fg: #e8f0f7;
-      --ok: #3ddc97;
-      --warn: #ffbf69;
-      --err: #ff6b6b;
-      --accent: #5ab0ff;
-      --btn: #1e2630;
+    :root{ color-scheme: dark; }
+    body{ margin:0; font-family: system-ui, Segoe UI, Roboto, Arial, sans-serif; background:#0b0f14; color:#e9eef6; }
+    .wrap{ max-width: 980px; margin: 0 auto; padding: 18px; }
+    h1{ font-size: 18px; margin: 0 0 12px; font-weight: 700; }
+    .grid{ display:grid; gap:12px; grid-template-columns: 1fr; }
+    @media (min-width: 900px){ .grid{ grid-template-columns: 1fr 1fr; } }
+
+    .card{ background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.10); border-radius: 14px; padding: 14px; }
+    .row{ display:flex; align-items:center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom:1px solid rgba(255,255,255,0.08); }
+    .row:last-child{ border-bottom:0; }
+
+    .name{ display:flex; align-items:center; gap:10px; font-weight: 650; }
+    .dot{ width:10px; height:10px; border-radius:999px; background:#777; box-shadow: 0 0 0 3px rgba(255,255,255,0.05) inset; }
+    .dot.on{ background:#2bd576; }
+    .dot.off{ background:#ff4d6d; }
+
+    .meta{ opacity: 0.8; font-size: 12px; }
+    .btns{ display:flex; flex-wrap: wrap; gap: 10px; }
+    button{
+      appearance:none; border:1px solid rgba(255,255,255,0.16);
+      background: rgba(255,255,255,0.06);
+      color:#e9eef6; border-radius: 12px;
+      padding: 10px 12px; cursor:pointer; font-weight: 650;
     }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0; background: var(--bg); color: var(--fg);
-      font: 500 16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-    }
-    .wrap { max-width: 980px; margin: 0 auto; padding: 20px; }
-    .row { display: grid; gap: 16px; grid-template-columns: 1fr; }
-    @media (min-width: 720px) { .row { grid-template-columns: 1fr 1fr; } }
-    .card {
-      background: var(--card); border-radius: 14px; padding: 16px;
-      box-shadow: 0 6px 24px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.03);
-    }
-    .header {
-      display: flex; gap: 12px; align-items: center; justify-content: space-between;
-      margin-bottom: 16px;
-    }
-    .badge {
-      display: inline-flex; align-items: center; gap: 8px;
-      background: #0f1620; border: 1px solid #1f2a37; border-radius: 999px;
-      padding: 8px 12px; color: var(--muted);
-    }
-    .badge b { color: var(--fg); }
-    .btns { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
-    button {
-      background: var(--btn); color: var(--fg);
-      border: 1px solid #2a3746; border-radius: 12px; padding: 12px;
-      cursor: pointer; transition: transform .02s ease, background .2s ease, opacity .2s ease;
-    }
-    button:hover { background: #232c38; transform: translateY(-1px); }
-    button:active { transform: translateY(0); }
-    button[disabled] { opacity: .6; cursor: not-allowed; }
-    .hint { color: var(--muted); font-size: 13px; margin-top: 8px; }
-    pre {
-      background: #0f1620; color: #d8e4ef; border: 1px solid #1f2a37;
-      border-radius: 12px; padding: 12px; overflow: auto; max-height: 360px;
-      white-space: pre-wrap; word-break: break-word;
-    }
-    .ok   { color: var(--ok); }
-    .warn { color: var(--warn); }
-    .err  { color: var(--err); }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
-    .grid2 { display: grid; grid-template-columns: 1fr; gap: 12px; }
-    @media (min-width: 720px) { .grid2 { grid-template-columns: 1fr 1fr; } }
+    button:hover{ background: rgba(255,255,255,0.10); }
+    button:disabled{ opacity:0.55; cursor:not-allowed; }
+
+    .big{ font-size: 13px; line-height: 1.35; white-space: pre-wrap; word-break: break-word; }
+    .label{ font-size: 12px; opacity:0.75; margin-bottom: 8px; }
+    .current{ font-weight: 700; }
+    .warn{ color:#ffcf5a; }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <div class="card">
-      <div class="header">
-        <div class="badge">
-          <span>Aktuell aktiv:</span>
-          <b id="currentMode">–</b>
+    <h1>Stream Relay Panel</h1>
+
+    <div class="grid">
+      <div class="card">
+        <div class="label">Quellen-Status (RTMP Eingänge)</div>
+
+        <div class="row">
+          <div class="name"><span id="d_dennis" class="dot off"></span> Dennis</div>
+          <div class="meta" id="m_dennis">–</div>
         </div>
-        <small class="hint mono" id="statusHint">—</small>
-      </div>
 
-      <div class="btns">
-        <button id="btn-dennis" data-source="dennis">Dennis</button>
-        <button id="btn-auria"  data-source="auria">Freundin</button>
-        <button id="btn-mobil"  data-source="mobil">Mobil</button>
-        <button id="btn-brb"    data-source="brb">BRB</button>
-      </div>
-      <div class="hint">Beim Umschalten sind die Buttons für 2 Sekunden gesperrt (gegen Doppelklicks).</div>
-    </div>
+        <div class="row">
+          <div class="name"><span id="d_auria" class="dot off"></span> Freundin</div>
+          <div class="meta" id="m_auria">–</div>
+        </div>
 
-    <div class="row" style="margin-top:16px;">
-      <div class="card">
-        <h3 style="margin:0 0 10px;">FFmpeg Kommando (Server → Twitch)</h3>
-        <pre id="cmdBox">(lade …)</pre>
-        <div class="hint">Dies ist das aktuell laufende Kommando laut <span class="mono">/api/current</span>.</div>
+        <div class="row">
+          <div class="name"><span id="d_mobil" class="dot off"></span> Mobil</div>
+          <div class="meta" id="m_mobil">–</div>
+        </div>
+
+        <div class="meta" style="margin-top:10px">
+          Grün = Publisher aktiv. Rot = keine Quelle. Zahlen zeigen nclients und bytes_in.
+        </div>
       </div>
 
       <div class="card">
-        <h3 style="margin:0 0 10px;">Log-Ausschnitt Twitch-Push (letzte 20 Zeilen)</h3>
-        <pre id="logBox">Noch kein Log verfügbar.
-– Falls hier nichts auftaucht, ist der Log-Endpoint <span class="mono">/api/logtail</span> noch nicht aktiviert.
-– Wir schalten ihn im nächsten Schritt auf dem Server frei.</pre>
-        <div class="hint">Die Box aktualisiert sich alle 3 Sekunden, falls der Endpoint vorhanden ist.</div>
+        <div class="label">Ausgabe (Twitch Push)</div>
+        <div style="margin-bottom:10px">
+          Aktuell aktiv: <span id="current" class="current">–</span>
+          <span id="curNote" class="meta"></span>
+        </div>
+
+        <div class="btns">
+          <button id="b_dennis" onclick="switchTo('dennis')">→ Twitch: Dennis</button>
+          <button id="b_auria" onclick="switchTo('auria')">→ Twitch: Freundin</button>
+          <button id="b_mobil" onclick="switchTo('mobil')">→ Twitch: Mobil</button>
+          <button id="b_brb" onclick="switchTo('brb')">→ Twitch: BRB</button>
+          <button id="b_stop" onclick="stopPush()">Stop</button>
+        </div>
+
+        <div class="meta" style="margin-top:10px">
+          Beim Umschalten sperren wir 2 Sekunden gegen Doppelklicks.
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="label">FFmpeg Kommando (laut /api/current)</div>
+        <div id="cmd" class="big">(lade …)</div>
+      </div>
+
+      <div class="card">
+        <div class="label">Log-Ausschnitt Twitch-Push (letzte 20 Zeilen)</div>
+        <div id="log" class="big">(lade …)</div>
+        <div id="logWarn" class="meta warn" style="display:none; margin-top:10px">
+          Kein Log verfügbar. Falls dauerhaft leer: läuft twitch-push nicht, oder Docker-Logs sind leer.
+        </div>
       </div>
     </div>
   </div>
 
-  <script>
-    const $mode = document.getElementById('currentMode');
-    const $hint = document.getElementById('statusHint');
-    const $cmd  = document.getElementById('cmdBox');
-    const $log  = document.getElementById('logBox');
-    const btns  = [...document.querySelectorAll('button[data-source]')];
+<script>
+  const $ = (id) => document.getElementById(id);
 
-    let busy = false;
-    let lastMode = null;
+  function setDot(id, on){
+    const el = $(id);
+    el.classList.remove("on","off");
+    el.classList.add(on ? "on" : "off");
+  }
 
-    async function getJSON(url) {
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json();
-    }
+  function fmtMeta(s){
+    const n = s?.nclients ?? 0;
+    const bi = s?.bytesIn ?? 0;
+    return `nclients=${n}, bytes_in=${bi}`;
+  }
 
-    function setBusy(on) {
-      busy = on;
-      btns.forEach(b => b.disabled = on);
-      $hint.textContent = on ? 'Umschalten …' : 'Bereit';
-    }
+  let lock = false;
+  function lockButtons(ms=2000){
+    lock = true;
+    ["b_dennis","b_auria","b_mobil","b_brb","b_stop"].forEach(id => $(id).disabled = true);
+    setTimeout(() => {
+      lock = false;
+      ["b_dennis","b_auria","b_mobil","b_brb","b_stop"].forEach(id => $(id).disabled = false);
+    }, ms);
+  }
 
-    async function refresh() {
-      try {
-        const j = await getJSON('/api/current');
-        const mode = j?.mode || '–';
-        $mode.textContent = mode;
-        $cmd.textContent = j?.cmd ? j.cmd : '(kein Kommando / inaktiv)';
+  async function switchTo(src){
+    if (lock) return;
+    lockButtons(2000);
+    await fetch("/api/switch", {
+      method:"POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ source: src })
+    }).catch(()=>{});
+    await refreshAll();
+  }
 
-        if (mode !== lastMode) {
-          lastMode = mode;
-          // kurze optische Bestätigung
-          $hint.textContent = `Aktiv: ${mode}`;
-          setTimeout(() => { if (!busy) $hint.textContent = 'Bereit'; }, 1200);
-        }
-      } catch (e) {
-        $mode.textContent = 'unbekannt';
-        $cmd.textContent = `Fehler beim Laden von /api/current: ${e.message || e}`;
-      }
-    }
+  async function stopPush(){
+    if (lock) return;
+    lockButtons(1500);
+    await fetch("/api/stop", { method:"POST" }).catch(()=>{});
+    await refreshAll();
+  }
 
-    async function refreshLog() {
-      try {
-        const res = await fetch('/api/logtail?lines=20');
-        if (!res.ok) {
-          if (res.status === 404) {
-            // Backend-Endpoint (noch) nicht vorhanden → stiller Hinweis
-            return;
-          }
-          throw new Error(`HTTP ${res.status}`);
-        }
-        const txt = await res.text();
-        if (txt && txt.trim().length) $log.textContent = txt;
-      } catch (_) {
-        /* still halten; UI soll nicht nerven */
-      }
-    }
+  async function refreshStatus(){
+    const j = await fetch("/api/status").then(r=>r.json()).catch(()=>null);
+    if (!j?.ok) return;
 
-    async function doSwitch(source) {
-      if (busy) return;
-      setBusy(true);
-      try {
-        const res = await fetch('/api/switch', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ source })
-        });
-        const j = await res.json().catch(() => ({}));
-        if (!res.ok || !j.ok) {
-          throw new Error(`Switch fehlgeschlagen (${res.status})`);
-        }
-        $hint.textContent = `Geschaltet auf: ${source}`;
-      } catch (e) {
-        $hint.textContent = `Fehler: ${e.message || e}`;
-      } finally {
-        setTimeout(() => setBusy(false), 2000); // 2s Debounce
-        refresh(); // frische Daten holen
-      }
-    }
+    const s = j.stat || {};
+    setDot("d_dennis", !!s.dennis?.publisher);
+    setDot("d_auria",  !!s.auria?.publisher);
+    setDot("d_mobil",  !!s.mobil?.publisher);
 
-    btns.forEach(b => b.addEventListener('click', () => doSwitch(b.dataset.source)));
+    $("m_dennis").textContent = fmtMeta(s.dennis);
+    $("m_auria").textContent  = fmtMeta(s.auria);
+    $("m_mobil").textContent  = fmtMeta(s.mobil);
+  }
 
-    // Polling
-    refresh();
-    setInterval(refresh, 2000);
-    setInterval(refreshLog, 3000);
-  </script>
+  async function refreshCurrent(){
+    const j = await fetch("/api/current").then(r=>r.json()).catch(()=>null);
+    if (!j?.ok) return;
+
+    $("current").textContent = j.mode || "–";
+    $("curNote").textContent = j.mode === "unknown" ? " (unbekannt)" : "";
+
+    $("cmd").textContent = (j.cmd && j.cmd.trim()) ? j.cmd.trim() : "(keine Daten)";
+  }
+
+  async function refreshLogtail(){
+    const t = await fetch("/api/logtail?lines=20").then(r=>r.text()).catch(()=> "");
+    $("log").textContent = t && t.trim() ? t.trim() : "(leer)";
+    $("logWarn").style.display = (t && t.trim()) ? "none" : "block";
+  }
+
+  async function refreshAll(){
+    await Promise.allSettled([refreshStatus(), refreshCurrent(), refreshLogtail()]);
+  }
+
+  refreshAll();
+  setInterval(refreshStatus, 3000);
+  setInterval(refreshCurrent, 3000);
+  setInterval(refreshLogtail, 3000);
+</script>
 </body>
 </html>

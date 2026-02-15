@@ -1,9 +1,12 @@
+"use strict";
+
 // Stream Control Panel Backend (Container-basierter Push, mit /api/current)
 // - /api/status  : nginx-rtmp /stat (Publisher + Bytes)
 // - /api/who     : Status + Logs des Containers "twitch-push" (auch wenn Exited)
-// - /api/stop    : docker rm -f twitch-push
-// - /api/switch  : Stop → docker run -d twitch-push mit ffmpeg-Command (über bash -lc)
-// - /api/current : ermittelt aktuelles Push-Target (brb|dennis|auria|mobil|idle|unknown)
+// - /api/logtail : Text-Logauszug (tail) von twitch-push für das Panel
+// - /api/stop    : GRACEFUL Stop (wie OBS): SIGINT an ffmpeg -> warten -> stop -> rm
+// - /api/switch  : FAST Switch (kein Offline auf Twitch): rm -f -> docker run
+// - /api/current : ermittelt aktuelles Push-Target (brb|dennis|auria|mobil|idle|unknown) + masked cmd
 // - /api/diag    : Docker/Network-Diagnose
 
 const express = require("express");
@@ -16,8 +19,8 @@ const NGINX_STAT_URL = process.env.NGINX_STAT_URL || "http://nginx-rtmp:18080/st
 // Keys/URL aus ENV (Panel-Container liest .env via compose)
 const TWITCH_RTMP_URL = process.env.TWITCH_RTMP_URL || "";
 const DENNIS = process.env.DENNIS || "";
-const AURIA  = process.env.AURIA  || "";
-const MOBIL  = process.env.MOBIL  || "";
+const AURIA = process.env.AURIA || "";
+const MOBIL = process.env.MOBIL || "";
 
 // Optionales Basic-Auth
 const PANEL_USER = process.env.PANEL_USER || "";
@@ -45,53 +48,77 @@ function sh(cmd) {
     exec(cmd, { maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
         const msg = (stderr || err.message || "").toString().trim();
-        console.error("[CMD FAIL]", cmd, "\n=>", msg);
         return reject(new Error(msg || "command failed"));
       }
       resolve((stdout || "").toString().trim());
     });
   });
 }
+
+// Variante, die NIE wirft (für "best effort" Log-Reads)
+async function shNoFail(cmd) {
+  try {
+    return await sh(cmd);
+  } catch (_e) {
+    return "";
+  }
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 const toNum = (x) => (Number.isFinite(+x) ? +x : 0);
 const esc = (s) => String(s).replace(/'/g, `'\\''`);
 
 // nginx-rtmp Parser (Publisher & Bytes)
 function hasPublisher(block) {
-  const rx = /<publisher>[\s\S]*?<\/publisher>|<publishing\s*\/>|<publishing>\s*1\s*<\/publishing>|<type>\s*publisher\s*<\/type>/i;
-  return rx.test(block);
+  return /<\/publisher>|<publishing>\s*1\s*<\/publishing>|<type>\s*publisher\s*<\/type>/i.test(block);
 }
+
 function parseAppBlock(block) {
-  let publisher = false, nclients = 0, bytesIn = 0, bytesOut = 0;
-  const rxStream = /<stream>([\s\S]*?)<\/stream>/g;
-  let m, any = false;
+  let publisher = false,
+    nclients = 0,
+    bytesIn = 0,
+    bytesOut = 0;
+
+  const rxStream = /([\s\S]*?)<\/stream>/g;
+  let m,
+    any = false;
+
   while ((m = rxStream.exec(block))) {
     any = true;
     const s = m[1];
     if (hasPublisher(s)) publisher = true;
-    nclients += toNum((s.match(/<nclients>(\d+)<\/nclients>/) || [])[1]);
-    bytesIn  += toNum((s.match(/<bytes_in>(\d+)<\/bytes_in>/)   || [])[1]);
-    bytesOut += toNum((s.match(/<bytes_out>(\d+)<\/bytes_out>/) || [])[1]);
+    nclients += toNum((s.match(/(\d+)<\/nclients>/) || [])[1]);
+    bytesIn += toNum((s.match(/(\d+)<\/bytes_in>/) || [])[1]);
+    bytesOut += toNum((s.match(/(\d+)<\/bytes_out>/) || [])[1]);
   }
+
   if (!any) {
     if (hasPublisher(block)) publisher = true;
-    nclients = toNum((block.match(/<nclients>(\d+)<\/nclients>/) || [])[1]);
-    bytesIn  = toNum((block.match(/<bytes_in>(\d+)<\/bytes_in>/)   || [])[1]);
-    bytesOut = toNum((block.match(/<bytes_out>(\d+)<\/bytes_out>/) || [])[1]);
+    nclients = toNum((block.match(/(\d+)<\/nclients>/) || [])[1]);
+    bytesIn = toNum((block.match(/(\d+)<\/bytes_in>/) || [])[1]);
+    bytesOut = toNum((block.match(/(\d+)<\/bytes_out>/) || [])[1]);
   }
+
   return { publisher, nclients, bytesIn, bytesOut };
 }
+
 function parseApplications(xml) {
   const apps = {};
-  const rxApp = /<application>([\s\S]*?)<\/application>/g;
+  const rxApp = /([\s\S]*?)<\/application>/g;
   let m;
+
   while ((m = rxApp.exec(xml))) {
     const block = m[1];
-    const name = (block.match(/<name>([^<]+)<\/name>/) || [])[1];
+    const name = (block.match(/([^<]+)<\/name>/) || [])[1];
     if (!name) continue;
     apps[name] = parseAppBlock(block);
   }
   return apps;
 }
+
 function buildStatus(xml) {
   const apps = parseApplications(xml);
   const safe = (n) => apps[n] || { publisher: false, nclients: 0, bytesIn: 0, bytesOut: 0 };
@@ -100,10 +127,12 @@ function buildStatus(xml) {
 
 async function getRelayNet() {
   const out = await sh("docker network ls --format '{{.Name}}'");
-  const lines = out.split("\n").map(s=>s.trim()).filter(Boolean);
-  return lines.find(n => n === "stream-relay_relay-net")
-      || lines.find(n => /_relay-net$/.test(n))
-      || "bridge";
+  const lines = out.split("\n").map((s) => s.trim()).filter(Boolean);
+  return (
+    lines.find((n) => n === "stream-relay_relay-net") ||
+    lines.find((n) => /_relay-net$/.test(n)) ||
+    "bridge"
+  );
 }
 
 function buildFfmpegCmd(source) {
@@ -117,7 +146,8 @@ function buildFfmpegCmd(source) {
       "-progress pipe:2",
       "-re -stream_loop -1 -i /work/brb.mp4",
       "-c:v copy -c:a aac -ar 44100 -b:a 128k",
-      "-f flv", `'${esc(TWITCH_RTMP_URL)}'`
+      "-f flv",
+      `'${esc(TWITCH_RTMP_URL)}'`,
     ].join(" ");
   }
 
@@ -130,20 +160,19 @@ function buildFfmpegCmd(source) {
     "set -euxo pipefail;",
     "ffmpeg -nostdin -hide_banner -loglevel info",
     "-progress pipe:2",
-    "-re -i", `'${esc(input)}'`,
+    "-re -i",
+    `'${esc(input)}'`,
     "-c:v copy -c:a aac -ar 44100 -b:a 128k",
-    "-f flv", `'${esc(TWITCH_RTMP_URL)}'`
+    "-f flv",
+    `'${esc(TWITCH_RTMP_URL)}'`,
   ].join(" ");
-}
-
-async function stopPushContainer() {
-  await sh("docker rm -f twitch-push 2>/dev/null || true");
 }
 
 async function startPushContainer(source) {
   const net = await getRelayNet();
   const cmd = buildFfmpegCmd(source);
-  // ENTRYPOINT überschreiben → /bin/bash -lc '<cmd>'
+
+  // ENTRYPOINT überschreiben → /bin/bash -lc ''
   const run = [
     "docker run -d --name twitch-push",
     `--network ${net}`,
@@ -151,9 +180,50 @@ async function startPushContainer(source) {
     "--entrypoint /bin/bash",
     "jrottenberg/ffmpeg:4.4-ubuntu",
     "-lc",
-    `'${esc(cmd)}'`
+    `'${esc(cmd)}'`,
   ].join(" ");
+
   return await sh(run);
+}
+
+async function pushExists() {
+  const id = await shNoFail("docker ps -a --filter name=^/twitch-push$ --format '{{.ID}}' 2>/dev/null || true");
+  return (id || "").trim();
+}
+
+function maskTwitchUrl(s) {
+  return String(s).replace(/(rtmp:\/\/live\.twitch\.tv\/app\/)([^'"\s]+)/gi, "$1***MASKED***");
+}
+
+function normalizeLogText(s) {
+  // ffmpeg schreibt progress oft mit \r (carriage return) zum "Zeile überschreiben"
+  // Für HTTP Textausgabe machen wir daraus echte Zeilen
+  return String(s || "").replace(/\r/g, "\n");
+}
+
+// FAST stop: gut für SWITCH (Twitch darf nicht offline gehen, weil sofort neuer Push kommt)
+async function fastStopPushContainer() {
+  await shNoFail("docker rm -f twitch-push 2>/dev/null || true");
+}
+
+// GRACEFUL stop: gut für STOP Button (Twitch soll sofort wirklich offline gehen)
+async function gracefulStopPushContainer() {
+  const id = await pushExists();
+  if (!id) return;
+
+  // 1) ffmpeg sauber beenden (SIGINT = wie 'q')
+  // wir probieren mehrere Wege, weil PID/Entrypoint variieren kann
+  await shNoFail("docker exec twitch-push sh -lc 'pkill -INT -x ffmpeg 2>/dev/null || true'");
+  await shNoFail("docker exec twitch-push bash -lc 'pkill -INT -x ffmpeg 2>/dev/null || true'");
+  await shNoFail("docker exec twitch-push sh -lc 'kill -INT 9 2>/dev/null || true'"); // falls ffmpeg PID 9 ist
+  await sleep(700);
+
+  // 2) Container stoppen (gibt noch Zeit fürs saubere RTMP teardown)
+  await shNoFail("docker stop -t 12 twitch-push 2>/dev/null || true");
+  await sleep(200);
+
+  // 3) Aufräumen
+  await shNoFail("docker rm -f twitch-push 2>/dev/null || true");
 }
 
 // ---------- API ----------
@@ -170,56 +240,86 @@ app.get("/api/status", async (_req, res) => {
 
 app.get("/api/who", async (_req, res) => {
   try {
-    const ps = await sh("docker ps -a --filter name=twitch-push --format '{{.ID}} {{.Image}} {{.Status}}'");
-    const logs = await sh("docker logs --tail 200 twitch-push 2>/dev/null || true");
+    const ps = await shNoFail(
+      "docker ps -a --filter name=^/twitch-push$ --format '{{.ID}} {{.Image}} {{.Status}}' 2>/dev/null || true"
+    );
+    if (!ps.trim()) {
+      return res.json({ ok: true, container: "", logs: "" });
+    }
+    const logsRaw = await shNoFail("docker logs --tail 200 twitch-push 2>/dev/null || true");
+    const logs = maskTwitchUrl(normalizeLogText(logsRaw));
     return res.json({ ok: true, container: ps, logs });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
 
-// NEU: Aktuelle Quelle erkennen (Cmd/Entrypoint inspizieren)
+// Logtail als Text fürs Panel (race-safe)
+app.get("/api/logtail", async (req, res) => {
+  const lines = Math.max(1, Math.min(500, parseInt(String(req.query.lines || "20"), 10) || 20));
+  try {
+    const id = await pushExists();
+    if (!id) return res.type("text/plain").status(200).send("");
+    const outRaw = await shNoFail(`docker logs --tail ${lines} twitch-push 2>/dev/null || true`);
+    const out = maskTwitchUrl(normalizeLogText(outRaw));
+    return res.type("text/plain").status(200).send(out || "");
+  } catch (_e) {
+    return res.type("text/plain").status(200).send("");
+  }
+});
+
+// Aktuelle Quelle erkennen (Cmd/Entrypoint inspizieren)
 async function currentMode() {
-  const cfgJson = await sh("docker inspect twitch-push --format '{{json .Config}}' 2>/dev/null || true");
+  const cfgJson = await shNoFail("docker inspect twitch-push --format '{{json .Config}}' 2>/dev/null || true");
   if (!cfgJson) return { mode: "idle" };
+
   let cfg;
-  try { cfg = JSON.parse(cfgJson); } catch { return { mode: "unknown" }; }
-  const entry = Array.isArray(cfg.Entrypoint) ? cfg.Entrypoint.join(" ") : (cfg.Entrypoint || "");
-  const cmdArr = Array.isArray(cfg.Cmd) ? cfg.Cmd : (cfg.Cmd ? [cfg.Cmd] : []);
+  try {
+    cfg = JSON.parse(cfgJson);
+  } catch {
+    return { mode: "unknown" };
+  }
+
+  const entry = Array.isArray(cfg.Entrypoint) ? cfg.Entrypoint.join(" ") : cfg.Entrypoint || "";
+  const cmdArr = Array.isArray(cfg.Cmd) ? cfg.Cmd : cfg.Cmd ? [cfg.Cmd] : [];
   const cmd = cmdArr.join(" ");
   const full = [entry, cmd].filter(Boolean).join(" ");
+
   if (/\/work\/brb\.mp4/.test(full)) return { mode: "brb", cmd: full };
   if (/rtmp:\/\/nginx-rtmp:1935\/dennis\//.test(full)) return { mode: "dennis", cmd: full };
-  if (/rtmp:\/\/nginx-rtmp:1935\/auria\//.test(full))  return { mode: "auria",  cmd: full };
-  if (/rtmp:\/\/nginx-rtmp:1935\/mobil\//.test(full))  return { mode: "mobil",  cmd: full };
+  if (/rtmp:\/\/nginx-rtmp:1935\/auria\//.test(full)) return { mode: "auria", cmd: full };
+  if (/rtmp:\/\/nginx-rtmp:1935\/mobil\//.test(full)) return { mode: "mobil", cmd: full };
   return { mode: "unknown", cmd: full };
 }
 
 app.get("/api/current", async (_req, res) => {
   try {
     const cur = await currentMode();
+    if (cur.cmd) cur.cmd = maskTwitchUrl(cur.cmd);
     return res.json({ ok: true, ...cur });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
 
+// STOP Button: GRACEFUL (Twitch sofort offline wie OBS)
 app.post("/api/stop", async (_req, res) => {
   try {
-    await stopPushContainer();
-    return res.json({ ok: true, stopped: true });
+    await gracefulStopPushContainer();
+    return res.json({ ok: true, stopped: true, mode: "idle" });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
 
+// SWITCH: FAST (kein Twitch Offline)
 app.post("/api/switch", async (req, res) => {
   try {
     const src = String((req.body && req.body.source) || "").toLowerCase();
     if (!["dennis", "auria", "mobil", "brb"].includes(src)) {
       return res.status(400).json({ ok: false, error: "invalid source" });
     }
-    await stopPushContainer();
+    await fastStopPushContainer();
     const id = await startPushContainer(src);
     return res.json({ ok: true, switched: src, container: id });
   } catch (e) {
@@ -229,11 +329,16 @@ app.post("/api/switch", async (req, res) => {
 
 app.get("/api/diag", async (_req, res) => {
   try {
-    const which = await sh("which docker || true");
-    const sock  = await sh("ls -l /var/run/docker.sock || true");
-    const net   = await getRelayNet();
-    const top   = await sh("docker ps -a --filter name=twitch-push --format '{{.ID}} {{.Image}} {{.Status}}' || true");
-    return res.json({ ok: true, docker: which || "(not found)", sock, network: net, push: top });
+    const which = await shNoFail("which docker || true");
+    const sock = await shNoFail("ls -l /var/run/docker.sock || true");
+    const net = await getRelayNet();
+    const top = await shNoFail("docker ps -a --filter name=^/twitch-push$ --format '{{.ID}} {{.Image}} {{.Status}}' || true");
+
+    // kleiner Probe-Log (best effort)
+    const probeRaw = await shNoFail("docker logs --tail 3 twitch-push 2>/dev/null || true");
+    const logsProbe = maskTwitchUrl(normalizeLogText(probeRaw));
+
+    return res.json({ ok: true, docker: which || "(not found)", sock, network: net, push: top, logsProbe });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e.message || e) });
   }
@@ -246,3 +351,4 @@ app.listen(PORT, () => {
   console.log(`✅ panel-server läuft auf Port ${PORT}`);
   console.log(`   NGINX_STAT_URL = ${NGINX_STAT_URL}`);
 });
+
