@@ -20,3 +20,8 @@ docker-data/
 ffmpeg/brb.mp4
 .env
 node_modules/
+
+# local backups
+panel-server/*.bak.*
+panel-server/*.bak2.*
+panel-server/public/*.bak.*
