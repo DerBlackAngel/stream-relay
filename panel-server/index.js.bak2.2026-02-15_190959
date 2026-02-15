@@ -4,8 +4,8 @@
 // - /api/status  : nginx-rtmp /stat (Publisher + Bytes)
 // - /api/who     : Status + Logs des Containers "twitch-push" (auch wenn Exited)
 // - /api/logtail : Text-Logauszug (tail) von twitch-push für das Panel
-// - /api/stop    : GRACEFUL Stop (wie OBS): SIGINT an ffmpeg -> warten -> stop -> rm
-// - /api/switch  : FAST Switch (kein Offline auf Twitch): rm -f -> docker run
+// - /api/stop    : docker rm -f twitch-push
+// - /api/switch  : Stop → docker run -d twitch-push mit ffmpeg-Command (über bash -lc)
 // - /api/current : ermittelt aktuelles Push-Target (brb|dennis|auria|mobil|idle|unknown) + masked cmd
 // - /api/diag    : Docker/Network-Diagnose
 
@@ -64,15 +64,12 @@ async function shNoFail(cmd) {
   }
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
 const toNum = (x) => (Number.isFinite(+x) ? +x : 0);
 const esc = (s) => String(s).replace(/'/g, `'\\''`);
 
 // nginx-rtmp Parser (Publisher & Bytes)
 function hasPublisher(block) {
+  // nginx-rtmp /stat XML kann je nach Version unterschiedlich aussehen, wir matchen breit.
   return /<\/publisher>|<publishing>\s*1\s*<\/publishing>|<type>\s*publisher\s*<\/type>/i.test(block);
 }
 
@@ -168,6 +165,10 @@ function buildFfmpegCmd(source) {
   ].join(" ");
 }
 
+async function stopPushContainer() {
+  await shNoFail("docker rm -f twitch-push 2>/dev/null || true");
+}
+
 async function startPushContainer(source) {
   const net = await getRelayNet();
   const cmd = buildFfmpegCmd(source);
@@ -192,38 +193,8 @@ async function pushExists() {
 }
 
 function maskTwitchUrl(s) {
+  // maskiert live_XXXX_YYYY... oder generell alles nach /app/ im Twitch RTMP
   return String(s).replace(/(rtmp:\/\/live\.twitch\.tv\/app\/)([^'"\s]+)/gi, "$1***MASKED***");
-}
-
-function normalizeLogText(s) {
-  // ffmpeg schreibt progress oft mit \r (carriage return) zum "Zeile überschreiben"
-  // Für HTTP Textausgabe machen wir daraus echte Zeilen
-  return String(s || "").replace(/\r/g, "\n");
-}
-
-// FAST stop: gut für SWITCH (Twitch darf nicht offline gehen, weil sofort neuer Push kommt)
-async function fastStopPushContainer() {
-  await shNoFail("docker rm -f twitch-push 2>/dev/null || true");
-}
-
-// GRACEFUL stop: gut für STOP Button (Twitch soll sofort wirklich offline gehen)
-async function gracefulStopPushContainer() {
-  const id = await pushExists();
-  if (!id) return;
-
-  // 1) ffmpeg sauber beenden (SIGINT = wie 'q')
-  // wir probieren mehrere Wege, weil PID/Entrypoint variieren kann
-  await shNoFail("docker exec twitch-push sh -lc 'pkill -INT -x ffmpeg 2>/dev/null || true'");
-  await shNoFail("docker exec twitch-push bash -lc 'pkill -INT -x ffmpeg 2>/dev/null || true'");
-  await shNoFail("docker exec twitch-push sh -lc 'kill -INT 9 2>/dev/null || true'"); // falls ffmpeg PID 9 ist
-  await sleep(700);
-
-  // 2) Container stoppen (gibt noch Zeit fürs saubere RTMP teardown)
-  await shNoFail("docker stop -t 12 twitch-push 2>/dev/null || true");
-  await sleep(200);
-
-  // 3) Aufräumen
-  await shNoFail("docker rm -f twitch-push 2>/dev/null || true");
 }
 
 // ---------- API ----------
@@ -240,14 +211,11 @@ app.get("/api/status", async (_req, res) => {
 
 app.get("/api/who", async (_req, res) => {
   try {
-    const ps = await shNoFail(
-      "docker ps -a --filter name=^/twitch-push$ --format '{{.ID}} {{.Image}} {{.Status}}' 2>/dev/null || true"
-    );
+    const ps = await shNoFail("docker ps -a --filter name=^/twitch-push$ --format '{{.ID}} {{.Image}} {{.Status}}' 2>/dev/null || true");
     if (!ps.trim()) {
       return res.json({ ok: true, container: "", logs: "" });
     }
-    const logsRaw = await shNoFail("docker logs --tail 200 twitch-push 2>/dev/null || true");
-    const logs = maskTwitchUrl(normalizeLogText(logsRaw));
+    const logs = await shNoFail("docker logs --tail 200 twitch-push 2>/dev/null || true");
     return res.json({ ok: true, container: ps, logs });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e.message || e) });
@@ -260,8 +228,7 @@ app.get("/api/logtail", async (req, res) => {
   try {
     const id = await pushExists();
     if (!id) return res.type("text/plain").status(200).send("");
-    const outRaw = await shNoFail(`docker logs --tail ${lines} twitch-push 2>/dev/null || true`);
-    const out = maskTwitchUrl(normalizeLogText(outRaw));
+    const out = await shNoFail(`docker logs --tail ${lines} twitch-push 2>/dev/null || true`);
     return res.type("text/plain").status(200).send(out || "");
   } catch (_e) {
     return res.type("text/plain").status(200).send("");
@@ -302,24 +269,22 @@ app.get("/api/current", async (_req, res) => {
   }
 });
 
-// STOP Button: GRACEFUL (Twitch sofort offline wie OBS)
 app.post("/api/stop", async (_req, res) => {
   try {
-    await gracefulStopPushContainer();
-    return res.json({ ok: true, stopped: true, mode: "idle" });
+    await stopPushContainer();
+    return res.json({ ok: true, stopped: true });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
 
-// SWITCH: FAST (kein Twitch Offline)
 app.post("/api/switch", async (req, res) => {
   try {
     const src = String((req.body && req.body.source) || "").toLowerCase();
     if (!["dennis", "auria", "mobil", "brb"].includes(src)) {
       return res.status(400).json({ ok: false, error: "invalid source" });
     }
-    await fastStopPushContainer();
+    await stopPushContainer();
     const id = await startPushContainer(src);
     return res.json({ ok: true, switched: src, container: id });
   } catch (e) {
@@ -333,12 +298,7 @@ app.get("/api/diag", async (_req, res) => {
     const sock = await shNoFail("ls -l /var/run/docker.sock || true");
     const net = await getRelayNet();
     const top = await shNoFail("docker ps -a --filter name=^/twitch-push$ --format '{{.ID}} {{.Image}} {{.Status}}' || true");
-
-    // kleiner Probe-Log (best effort)
-    const probeRaw = await shNoFail("docker logs --tail 3 twitch-push 2>/dev/null || true");
-    const logsProbe = maskTwitchUrl(normalizeLogText(probeRaw));
-
-    return res.json({ ok: true, docker: which || "(not found)", sock, network: net, push: top, logsProbe });
+    return res.json({ ok: true, docker: which || "(not found)", sock, network: net, push: top });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e.message || e) });
   }
@@ -351,4 +311,3 @@ app.listen(PORT, () => {
   console.log(`✅ panel-server läuft auf Port ${PORT}`);
   console.log(`   NGINX_STAT_URL = ${NGINX_STAT_URL}`);
 });
-
