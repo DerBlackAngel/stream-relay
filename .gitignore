@@ -25,3 +25,6 @@ node_modules/
 panel-server/*.bak.*
 panel-server/*.bak2.*
 panel-server/public/*.bak.*
+
+*.BAK
+*.BAK2
